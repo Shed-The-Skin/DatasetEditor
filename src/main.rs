@@ -1,10 +1,9 @@
 use eframe::egui;
 use image::io::Reader as ImageReader;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use walkdir::WalkDir;
 use rfd::FileDialog;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -738,6 +737,6 @@ fn main() -> Result<(), eframe::Error> {
     eframe::run_native(
         "Image Tagger",
         native_options,
-        Box::new(|cc| Box::new(ImageTagger::new(cc))),
+        Box::new(|cc| Ok(Box::new(ImageTagger::new(cc)))),
     )
 }
