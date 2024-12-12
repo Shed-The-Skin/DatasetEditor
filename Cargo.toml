@@ -2,7 +2,7 @@
 name = "Dataset-Editor"
 version = "0.1.0"
 edition = "2021"
-authors = ["ShedTheSkin"]
+
 
 [dependencies]
 eframe = "0.24"
