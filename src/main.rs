@@ -1,5 +1,5 @@
 use eframe::egui;
-use image::io::Reader as ImageReader;
+use image::ImageReader;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
