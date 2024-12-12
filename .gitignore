@@ -1,0 +1,40 @@
+# Rust specific
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# IDEs and editors
+.idea/
+.vscode/
+*.swp
+*.swo
+.vs/
+*.user
+*.userosscache
+*.suo
+*.iml
+*.iws
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# Build outputs
+/dist/
+/build/
+/out/
+
+# Debug files
+*.pdb
+*.log
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Large data files
+*.csv
+*.json
+*.db
+*.sqlite
