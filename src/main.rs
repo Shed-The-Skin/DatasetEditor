@@ -1,7 +1,7 @@
 use eframe::egui;
 use image::ImageReader;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use rfd::FileDialog;
@@ -13,6 +13,7 @@ use rayon::prelude::*;
 struct ImageData {
     path: PathBuf,
     tags: Vec<String>,
+    hash: Option<Vec<u8>>,
 }
 
 #[derive(Debug)]
@@ -42,6 +43,7 @@ enum CacheMessage {
         width: u32,
         height: u32,
         pixels: Vec<u8>,
+        hash: Vec<u8>,
     },
     Error {
         idx: usize,
@@ -56,6 +58,11 @@ enum CacheProgress {
     Resizing { idx: usize },
     Completed { idx: usize },
     Error { idx: usize },
+}
+
+#[derive(Clone)]
+enum DuplicateMessage {
+    Found { duplicates: HashMap<PathBuf, Vec<PathBuf>> },
 }
 
 #[derive(Default)]
@@ -86,6 +93,10 @@ struct ImageTagger {
     is_caching: bool,
     activation_tag: String,
     progress_receiver: Option<std::sync::mpsc::Receiver<CacheProgress>>,
+    duplicate_images: HashMap<PathBuf, Vec<PathBuf>>, // Original -> Duplicates
+    images_to_delete: HashSet<PathBuf>,  // Images marked for deletion
+    feedback_tx: Option<std::sync::mpsc::Sender<DuplicateMessage>>,
+    duplicate_rx: Option<std::sync::mpsc::Receiver<DuplicateMessage>>,
 }
 
 impl ImageTagger {
@@ -99,8 +110,107 @@ impl ImageTagger {
             is_caching: false,
             activation_tag: String::new(),
             feedback_duration: 5.0,
+            feedback_tx: None,
+            duplicate_rx: None,
             ..Default::default()
         }
+    }
+
+    fn calculate_image_hash(&self, path: &Path) -> Option<Vec<u8>> {
+        if let Ok(img_reader) = ImageReader::open(path) {
+            if let Ok(img) = img_reader.decode() {
+                // Resize to small dimensions for faster hashing
+                let small = img.resize(8, 8, image::imageops::FilterType::Nearest);
+                let gray = small.grayscale();
+                let buffer = gray.to_luma8();
+
+                // Calculate average value
+                let pixels = buffer.as_raw();
+                let average: u8 = (pixels.iter().map(|&p| p as u32).sum::<u32>() / pixels.len() as u32) as u8;
+
+                // Create binary hash: 1 if above average, 0 if below
+                let mut hash = Vec::with_capacity(8);
+                for chunk in pixels.chunks(8) {
+                    let mut byte = 0u8;
+                    for (i, &pixel) in chunk.iter().enumerate() {
+                        if pixel > average {
+                            byte |= 1 << i;
+                        }
+                    }
+                    hash.push(byte);
+                }
+
+                return Some(hash);
+            }
+        }
+        None
+    }
+
+    fn find_duplicates(&mut self) {
+        self.feedback_message = Some("Scanning for duplicates...".to_string());
+        self.feedback_timer = Some(std::time::Instant::now());
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.feedback_tx = Some(tx.clone());
+        self.duplicate_rx = Some(rx);
+
+        let images = self.images.clone();
+        let feedback_tx = tx;  // Use the cloned sender
+
+        // Spawn background thread
+        thread::spawn(move || {
+            let mut duplicate_map: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+            let mut hash_map: HashMap<Vec<u8>, PathBuf> = HashMap::new();
+
+            for image in &images {
+                if let Some(hash) = &image.hash {
+                    if let Some(original) = hash_map.get(hash) {
+                        duplicate_map
+                            .entry(original.clone())
+                            .or_default()
+                            .push(image.path.clone());
+                    } else {
+                        hash_map.insert(hash.clone(), image.path.clone());
+                    }
+                }
+            }
+
+            // Send results back to main thread
+            let _ = feedback_tx.send(DuplicateMessage::Found { duplicates: duplicate_map });
+        });
+    }
+
+    fn remove_duplicates(&mut self) -> Result<(), std::io::Error> {
+        for duplicates in self.duplicate_images.values() {
+            for duplicate in duplicates {
+                // Remove the file
+                if let Err(e) = fs::remove_file(duplicate) {
+                    return Err(e);
+                }
+
+                // Remove associated tag file if it exists
+                let tag_file = duplicate.with_extension("txt");
+                if tag_file.exists() {
+                    if let Err(e) = fs::remove_file(tag_file) {
+                        return Err(e);
+                    }
+                }
+
+                // Mark for removal from our images list
+                self.images_to_delete.insert(duplicate.clone());
+            }
+        }
+
+        // Remove the deleted images from our list
+        self.images.retain(|img| !self.images_to_delete.contains(&img.path));
+
+        // Clear the duplicates list
+        self.duplicate_images.clear();
+        self.images_to_delete.clear();
+
+        self.feedback_message = Some("Duplicate images removed successfully.".to_string());
+        self.feedback_timer = Some(std::time::Instant::now());
+        Ok(())
     }
 
     fn draw_feedback_message(&mut self, ui: &mut egui::Ui) {
@@ -171,9 +281,25 @@ impl ImageTagger {
                             Ok(img_reader) => {
                                 match img_reader.decode() {
                                     Ok(img) => {
-                                        // Send resizing status
-                                        let _ = progress_tx.send(CacheProgress::Resizing { idx });
+                                        // Calculate hash first
+                                        let small = img.resize(8, 8, image::imageops::FilterType::Nearest);
+                                        let gray = small.grayscale();
+                                        let buffer = gray.to_luma8();
+                                        let pixels = buffer.as_raw();
+                                        let average: u8 = (pixels.iter().map(|&p| p as u32).sum::<u32>() / pixels.len() as u32) as u8;
 
+                                        let mut hash = Vec::with_capacity(8);
+                                        for chunk in pixels.chunks(8) {
+                                            let mut byte = 0u8;
+                                            for (i, &pixel) in chunk.iter().enumerate() {
+                                                if pixel > average {
+                                                    byte |= 1 << i;
+                                                }
+                                            }
+                                            hash.push(byte);
+                                        }
+
+                                        // Continue with normal image processing...
                                         let width = (800.0 * (img.width() as f32 / img.height() as f32)).min(800.0) as u32;
                                         let height = (800.0 * (img.height() as f32 / img.width() as f32)).min(800.0) as u32;
 
@@ -185,6 +311,7 @@ impl ImageTagger {
                                             width,
                                             height,
                                             pixels: rgba.to_vec(),
+                                            hash,
                                         }).is_ok() {
                                             println!("Decoded in {:?}: {}", start.elapsed(), image.path.display());
 
@@ -457,9 +584,13 @@ impl ImageTagger {
             for entry in entries.filter_map(|e| e.ok()) {
                 let path = entry.path();
                 if path.is_file() && matches!(path.extension().and_then(|e| e.to_str()),
-                    Some("jpg" | "jpeg" | "png")) {
+                Some("jpg" | "jpeg" | "png")) {
                     let tags = self.load_tags_for_image(&path).unwrap_or_default();
-                    self.images.push(ImageData { path, tags });
+                    self.images.push(ImageData {
+                        path,
+                        tags,
+                        hash: None
+                    });
                 }
             }
         }
@@ -515,11 +646,27 @@ impl ImageTagger {
 
 impl eframe::App for ImageTagger {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if let Some(rx) = &self.duplicate_rx {
+            if let Ok(DuplicateMessage::Found { duplicates }) = rx.try_recv() {
+                self.duplicate_images = duplicates;
+                let count = self.duplicate_images.values()
+                    .map(|v| v.len())
+                    .sum::<usize>();
+
+                self.feedback_message = Some(format!(
+                    "Found {} duplicate images. Click 'Remove Duplicates' to delete them.",
+                    count
+                ));
+                self.feedback_timer = Some(std::time::Instant::now());
+            }
+        }
+
+        // Process decoded messages
         // Process decoded messages
         if let Some(rx) = &self.decoded_receiver {
             while let Ok(message) = rx.try_recv() {
                 match message {
-                    CacheMessage::ImageDecoded { idx, width, height, pixels } => {
+                    CacheMessage::ImageDecoded { idx, width, height, pixels, hash } => {  // <-- Updated here
                         let color_image = egui::ColorImage::from_rgba_unmultiplied(
                             [width as _, height as _],
                             &pixels,
@@ -530,6 +677,11 @@ impl eframe::App for ImageTagger {
                             color_image,
                             egui::TextureOptions::default(),
                         );
+
+                        // Store the hash with the image data
+                        if let Some(image) = self.images.get_mut(idx) {
+                            image.hash = Some(hash);
+                        }
 
                         self.image_cache.insert(idx, texture);
                         // Update progress whenever we cache an image
@@ -564,6 +716,19 @@ impl eframe::App for ImageTagger {
                 }
                 if ui.button("Apply").clicked() {
                     self.apply_activation_tag();
+                }
+
+                if ui.button("Find Duplicates").clicked() {
+                    self.find_duplicates();
+                }
+
+                if !self.duplicate_images.is_empty() {
+                    if ui.button("Remove Duplicates").clicked() {
+                        if let Err(err) = self.remove_duplicates() {
+                            self.feedback_message = Some(format!("Error removing duplicates: {}", err));
+                            self.feedback_timer = Some(std::time::Instant::now());
+                        }
+                    }
                 }
             });
 
@@ -683,14 +848,14 @@ impl eframe::App for ImageTagger {
 
                 ui.add_space(5.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Remove Duplicates (Current)").clicked() {
+                    if ui.button("Remove Duplicate Tags (Current Image)").clicked() {
                         if let Some(current_image) = self.images.get_mut(self.current_image_idx) {
                             let mut seen = std::collections::HashSet::new();
                             current_image.tags.retain(|tag| seen.insert(tag.clone()));
                             self.modified_files.insert(current_image.path.clone(), true);
                         }
                     }
-                    if ui.button("Remove Duplicates (All)").clicked() {
+                    if ui.button("Remove Duplicate Tags (All Images)").clicked() {
                         self.remove_duplicates_for_all();
                     }
                 });
