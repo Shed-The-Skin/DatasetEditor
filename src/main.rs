@@ -1,5 +1,5 @@
 use eframe::egui;
-use image::io::Reader as ImageReader;
+use image::ImageReader;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -74,6 +74,7 @@ struct ImageTagger {
     modified_files: HashMap<PathBuf, bool>,
     feedback_message: Option<String>,
     feedback_timer: Option<std::time::Instant>,
+    feedback_duration: f32,
     current_sorting: Option<fn(&String, &String) -> std::cmp::Ordering>,
     image_cache: HashMap<usize, egui::TextureHandle>,
     last_logged_image_idx: Option<usize>,
@@ -97,7 +98,42 @@ impl ImageTagger {
             cached_images_count: Arc::new(Mutex::new(0)),
             is_caching: false,
             activation_tag: String::new(),
+            feedback_duration: 5.0,
             ..Default::default()
+        }
+    }
+
+    fn draw_feedback_message(&mut self, ui: &mut egui::Ui) {
+        if let Some(timer) = self.feedback_timer {
+            let elapsed = timer.elapsed().as_secs_f32();
+
+            if elapsed < self.feedback_duration {
+                // Calculate alpha based on time remaining
+                let alpha = if elapsed > (self.feedback_duration - 3.0) {
+                    // Last 3 seconds - fade out
+                    ((self.feedback_duration - elapsed) / 3.0).clamp(0.0, 1.0)
+                } else {
+                    // Full opacity for first 2 seconds
+                    1.0
+                };
+
+                if let Some(message) = &self.feedback_message {
+                    let color = egui::Color32::from_rgba_unmultiplied(
+                        0,    // Red
+                        255,  // Green
+                        0,    // Blue
+                        (alpha * 255.0) as u8  // Alpha
+                    );
+                    ui.colored_label(color, message);
+                }
+
+                // Request repaint for smooth animation
+                ui.ctx().request_repaint();
+            } else {
+                // Clear the message and timer when duration is exceeded
+                self.feedback_message = None;
+                self.feedback_timer = None;
+            }
         }
     }
 
@@ -214,7 +250,7 @@ impl ImageTagger {
         if !self.activation_tag.is_empty() {
             for image in &mut self.images {
                 if !image.tags.contains(&self.activation_tag) {
-                    image.tags.push(self.activation_tag.clone());
+                    image.tags.insert(0, self.activation_tag.clone());
                     self.modified_files.insert(image.path.clone(), true);
                 }
             }
@@ -416,7 +452,7 @@ impl ImageTagger {
         self.is_caching = false;
         *self.cached_images_count.lock().unwrap() = 0;
 
-        // Load image paths and metadata from only the selected directory (no subdirs)
+        // Load image paths and metadata from only the selected directory (no subdirectories)
         if let Ok(entries) = fs::read_dir(path) {
             for entry in entries.filter_map(|e| e.ok()) {
                 let path = entry.path();
@@ -510,9 +546,7 @@ impl eframe::App for ImageTagger {
 
         // Top panel with controls and progress
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
-            if let Some(message) = &self.feedback_message {
-                ui.colored_label(egui::Color32::GREEN, message);
-            }
+            self.draw_feedback_message(ui);
 
             ui.horizontal(|ui| {
                 if ui.button("Save").clicked() {
@@ -625,7 +659,6 @@ impl eframe::App for ImageTagger {
                 });
 
                 egui::ScrollArea::vertical()
-                    .id_source(format!("tag_display_{}", self.current_image_idx))
                     .show(ui, |ui| {
                         for tag in &self.images[self.current_image_idx].tags {
                             ui.label(tag);
@@ -700,7 +733,6 @@ impl eframe::App for ImageTagger {
 
                 if let Some(_current_image) = self.images.get(self.current_image_idx) {
                     egui::ScrollArea::vertical()
-                        .id_source(format!("tag_editing_{}", self.current_image_idx))
                         .show(ui, |ui| {
                             for tag in &self.images[self.current_image_idx].tags {
                                 ui.horizontal(|ui| {
