@@ -452,7 +452,7 @@ impl ImageTagger {
         self.is_caching = false;
         *self.cached_images_count.lock().unwrap() = 0;
 
-        // Load image paths and metadata from only the selected directory (no subdirs)
+        // Load image paths and metadata from only the selected directory (no subdirectories)
         if let Ok(entries) = fs::read_dir(path) {
             for entry in entries.filter_map(|e| e.ok()) {
                 let path = entry.path();
@@ -546,9 +546,7 @@ impl eframe::App for ImageTagger {
 
         // Top panel with controls and progress
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
-            if let Some(message) = &self.feedback_message {
-                self.draw_feedback_message(ui);
-            }
+            self.draw_feedback_message(ui);
 
             ui.horizontal(|ui| {
                 if ui.button("Save").clicked() {
@@ -661,7 +659,6 @@ impl eframe::App for ImageTagger {
                 });
 
                 egui::ScrollArea::vertical()
-                    .id_source(format!("tag_display_{}", self.current_image_idx))
                     .show(ui, |ui| {
                         for tag in &self.images[self.current_image_idx].tags {
                             ui.label(tag);
@@ -736,7 +733,6 @@ impl eframe::App for ImageTagger {
 
                 if let Some(_current_image) = self.images.get(self.current_image_idx) {
                     egui::ScrollArea::vertical()
-                        .id_source(format!("tag_editing_{}", self.current_image_idx))
                         .show(ui, |ui| {
                             for tag in &self.images[self.current_image_idx].tags {
                                 ui.horizontal(|ui| {
