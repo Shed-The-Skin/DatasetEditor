@@ -8,6 +8,10 @@ use rfd::FileDialog;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use rayon::prelude::*;
+#[path = "booru-tag-manager.rs"]
+mod booru_tag_manager;
+
+use booru_tag_manager::BooruTagManager;
 
 #[derive(Serialize, Deserialize, Clone)]
 struct ImageData {
@@ -20,20 +24,6 @@ struct ImageData {
 enum TagAction {
     Add(String),
     Remove(String),
-}
-
-#[derive(Clone)]
-struct CacheUpdate {
-    idx: usize,
-    texture: egui::TextureHandle,
-}
-
-#[derive(Clone)]
-struct DecodedImage {
-    width: u32,
-    height: u32,
-    pixels: Vec<u8>,
-    path: PathBuf,
 }
 
 #[derive(Clone)]
@@ -65,7 +55,6 @@ enum DuplicateMessage {
     Found { duplicates: HashMap<PathBuf, Vec<PathBuf>> },
 }
 
-#[derive(Default)]
 struct ImageTagger {
     current_dir: Option<PathBuf>,
     images: Vec<ImageData>,
@@ -93,157 +82,77 @@ struct ImageTagger {
     is_caching: bool,
     activation_tag: String,
     progress_receiver: Option<std::sync::mpsc::Receiver<CacheProgress>>,
-    duplicate_images: HashMap<PathBuf, Vec<PathBuf>>, // Original -> Duplicates
-    images_to_delete: HashSet<PathBuf>,  // Images marked for deletion
+    duplicate_images: HashMap<PathBuf, Vec<PathBuf>>,
+    images_to_delete: HashSet<PathBuf>,
     feedback_tx: Option<std::sync::mpsc::Sender<DuplicateMessage>>,
     duplicate_rx: Option<std::sync::mpsc::Receiver<DuplicateMessage>>,
+    booru_manager: BooruTagManager,
+    show_tag_suggestions: bool,
 }
 
-impl ImageTagger {
-    fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+impl Default for ImageTagger {
+    fn default() -> Self {
         Self {
-            progress_receiver: None,
+            current_dir: None,
+            images: Vec::new(),
+            current_image_idx: 0,
+            new_tag: String::new(),
+            search_tag: String::new(),
+            prepend_tags: false,
+            sort_ascending: true,
+            sort_by_frequency: false,
+            current_texture: None,
+            tag_to_remove: None,
+            show_tag_stats: false,
+            modified_files: HashMap::new(),
+            feedback_message: None,
+            feedback_timer: None,
+            feedback_duration: 5.0,
+            current_sorting: None,
+            image_cache: HashMap::new(),
+            last_logged_image_idx: None,
+            state_changed: false,
             decoded_receiver: None,
             cache_progress: 0.0,
             total_images_to_cache: 0,
             cached_images_count: Arc::new(Mutex::new(0)),
             is_caching: false,
             activation_tag: String::new(),
-            feedback_duration: 5.0,
+            progress_receiver: None,
+            duplicate_images: HashMap::new(),
+            images_to_delete: HashSet::new(),
             feedback_tx: None,
             duplicate_rx: None,
-            ..Default::default()
+            booru_manager: BooruTagManager::new(),
+            show_tag_suggestions: false,
         }
     }
+}
 
-    fn calculate_image_hash(&self, path: &Path) -> Option<Vec<u8>> {
-        if let Ok(img_reader) = ImageReader::open(path) {
-            if let Ok(img) = img_reader.decode() {
-                // Resize to small dimensions for faster hashing
-                let small = img.resize(8, 8, image::imageops::FilterType::Nearest);
-                let gray = small.grayscale();
-                let buffer = gray.to_luma8();
+impl ImageTagger {
+    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        let mut tagger = Self::default();
 
-                // Calculate average value
-                let pixels = buffer.as_raw();
-                let average: u8 = (pixels.iter().map(|&p| p as u32).sum::<u32>() / pixels.len() as u32) as u8;
-
-                // Create binary hash: 1 if above average, 0 if below
-                let mut hash = Vec::with_capacity(8);
-                for chunk in pixels.chunks(8) {
-                    let mut byte = 0u8;
-                    for (i, &pixel) in chunk.iter().enumerate() {
-                        if pixel > average {
-                            byte |= 1 << i;
-                        }
-                    }
-                    hash.push(byte);
-                }
-
-                return Some(hash);
-            }
-        }
-        None
-    }
-
-    fn find_duplicates(&mut self) {
-        self.feedback_message = Some("Scanning for duplicates...".to_string());
-        self.feedback_timer = Some(std::time::Instant::now());
-
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.feedback_tx = Some(tx.clone());
-        self.duplicate_rx = Some(rx);
-
-        let images = self.images.clone();
-        let feedback_tx = tx;  // Use the cloned sender
-
-        // Spawn background thread
-        thread::spawn(move || {
-            let mut duplicate_map: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
-            let mut hash_map: HashMap<Vec<u8>, PathBuf> = HashMap::new();
-
-            for image in &images {
-                if let Some(hash) = &image.hash {
-                    if let Some(original) = hash_map.get(hash) {
-                        duplicate_map
-                            .entry(original.clone())
-                            .or_default()
-                            .push(image.path.clone());
-                    } else {
-                        hash_map.insert(hash.clone(), image.path.clone());
-                    }
-                }
-            }
-
-            // Send results back to main thread
-            let _ = feedback_tx.send(DuplicateMessage::Found { duplicates: duplicate_map });
-        });
-    }
-
-    fn remove_duplicates(&mut self) -> Result<(), std::io::Error> {
-        for duplicates in self.duplicate_images.values() {
-            for duplicate in duplicates {
-                // Remove the file
-                if let Err(e) = fs::remove_file(duplicate) {
-                    return Err(e);
-                }
-
-                // Remove associated tag file if it exists
-                let tag_file = duplicate.with_extension("txt");
-                if tag_file.exists() {
-                    if let Err(e) = fs::remove_file(tag_file) {
-                        return Err(e);
-                    }
-                }
-
-                // Mark for removal from our images list
-                self.images_to_delete.insert(duplicate.clone());
-            }
+        if let Err(err) = tagger.booru_manager.load_from_csv(
+            std::path::Path::new("danbooru-12-10-24-underscore.csv")
+        ) {
+            eprintln!("Failed to load Booru database: {}", err);
         }
 
-        // Remove the deleted images from our list
-        self.images.retain(|img| !self.images_to_delete.contains(&img.path));
-
-        // Clear the duplicates list
-        self.duplicate_images.clear();
-        self.images_to_delete.clear();
-
-        self.feedback_message = Some("Duplicate images removed successfully.".to_string());
-        self.feedback_timer = Some(std::time::Instant::now());
-        Ok(())
+        tagger
     }
 
-    fn draw_feedback_message(&mut self, ui: &mut egui::Ui) {
-        if let Some(timer) = self.feedback_timer {
-            let elapsed = timer.elapsed().as_secs_f32();
-
-            if elapsed < self.feedback_duration {
-                // Calculate alpha based on time remaining
-                let alpha = if elapsed > (self.feedback_duration - 3.0) {
-                    // Last 3 seconds - fade out
-                    ((self.feedback_duration - elapsed) / 3.0).clamp(0.0, 1.0)
-                } else {
-                    // Full opacity for first 2 seconds
-                    1.0
-                };
-
-                if let Some(message) = &self.feedback_message {
-                    let color = egui::Color32::from_rgba_unmultiplied(
-                        0,    // Red
-                        255,  // Green
-                        0,    // Blue
-                        (alpha * 255.0) as u8  // Alpha
-                    );
-                    ui.colored_label(color, message);
-                }
-
-                // Request repaint for smooth animation
-                ui.ctx().request_repaint();
-            } else {
-                // Clear the message and timer when duration is exceeded
-                self.feedback_message = None;
-                self.feedback_timer = None;
-            }
+    fn load_tags_for_image(&self, image_path: &Path) -> Result<Vec<String>, std::io::Error> {
+        let tags_path = image_path.with_extension("txt");
+        if tags_path.exists() {
+            let content = fs::read_to_string(tags_path)?;
+            Ok(content
+                .split(',')
+                .map(|tag| tag.trim().to_string())
+                .filter(|tag| !tag.is_empty())
+                .collect())
+        } else {
+            Ok(Vec::new())
         }
     }
 
@@ -268,20 +177,16 @@ impl ImageTagger {
                 let chunk_indices: Vec<_> = (chunk_start..chunk_end).collect();
 
                 chunk_indices.into_par_iter().for_each_with((tx.clone(), progress_tx.clone()), |(tx, progress_tx), idx| {
-                    // Send started status
                     let _ = progress_tx.send(CacheProgress::Started { idx });
 
                     if let Some(image) = images.get(idx) {
                         let start = std::time::Instant::now();
-
-                        // Send loading status
                         let _ = progress_tx.send(CacheProgress::Loading { idx });
 
                         match ImageReader::open(&image.path) {
                             Ok(img_reader) => {
                                 match img_reader.decode() {
                                     Ok(img) => {
-                                        // Calculate hash first
                                         let small = img.resize(8, 8, image::imageops::FilterType::Nearest);
                                         let gray = small.grayscale();
                                         let buffer = gray.to_luma8();
@@ -299,7 +204,6 @@ impl ImageTagger {
                                             hash.push(byte);
                                         }
 
-                                        // Continue with normal image processing...
                                         let width = (800.0 * (img.width() as f32 / img.height() as f32)).min(800.0) as u32;
                                         let height = (800.0 * (img.height() as f32 / img.width() as f32)).min(800.0) as u32;
 
@@ -314,11 +218,8 @@ impl ImageTagger {
                                             hash,
                                         }).is_ok() {
                                             println!("Decoded in {:?}: {}", start.elapsed(), image.path.display());
-
                                             let mut count = cached_count.lock().unwrap();
                                             *count += 1;
-
-                                            // Send completed status
                                             let _ = progress_tx.send(CacheProgress::Completed { idx });
                                         }
                                     }
@@ -345,19 +246,258 @@ impl ImageTagger {
         });
     }
 
-    fn pause_caching(&mut self) {
-        self.is_caching = false;
-        // Preserve receiver and cache, just pause the process
-    }
+    fn update_app(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // Process duplicate detection results
+        if let Some(rx) = &self.duplicate_rx {
+            if let Ok(DuplicateMessage::Found { duplicates }) = rx.try_recv() {
+                self.duplicate_images = duplicates;
+                let count = self.duplicate_images.values()
+                    .map(|v| v.len())
+                    .sum::<usize>();
 
-    fn resume_caching(&mut self) {
-        if !self.images.is_empty() && !self.is_caching {
-            self.is_caching = true;
-            // Don't restart caching if we still have the receiver
-            if self.decoded_receiver.is_none() {
-                self.start_background_caching();
+                self.feedback_message = Some(format!(
+                    "Found {} duplicate images. Click 'Remove Duplicates' to delete them.",
+                    count
+                ));
+                self.feedback_timer = Some(std::time::Instant::now());
             }
         }
+
+        // Process cached images
+        if let Some(rx) = &self.decoded_receiver {
+            while let Ok(message) = rx.try_recv() {
+                match message {
+                    CacheMessage::ImageDecoded { idx, width, height, pixels, hash } => {
+                        let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                            [width as _, height as _],
+                            &pixels,
+                        );
+
+                        let texture = ctx.load_texture(
+                            format!("image_{}", idx),
+                            color_image,
+                            egui::TextureOptions::default(),
+                        );
+
+                        if let Some(image) = self.images.get_mut(idx) {
+                            image.hash = Some(hash);
+                        }
+
+                        self.image_cache.insert(idx, texture);
+                        let count = *self.cached_images_count.lock().unwrap();
+                        self.cache_progress = count as f32 / self.total_images_to_cache as f32;
+                        ctx.request_repaint();
+                    }
+                    CacheMessage::Error { idx, error } => {
+                        eprintln!("Error caching image {}: {}", idx, error);
+                    }
+                }
+            }
+        }
+
+        // Draw UI panels
+        self.draw_top_panel(ctx);
+        self.draw_left_panel(ctx);
+        self.draw_central_panel(ctx);
+        self.draw_right_panel(ctx);
+    }
+
+    fn draw_top_panel(&mut self, ctx: &egui::Context) {
+        egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
+            self.draw_feedback_message(ui);
+
+            ui.horizontal(|ui| {
+                if ui.button("Save").clicked() {
+                    self.save_all();
+                }
+                if ui.button("Backup").clicked() {
+                    self.backup_dataset();
+                }
+
+                ui.separator();
+                ui.label("Activation tag:");
+                if ui.text_edit_singleline(&mut self.activation_tag).lost_focus()
+                    && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    self.apply_activation_tag();
+                }
+                if ui.button("Apply").clicked() {
+                    self.apply_activation_tag();
+                }
+            });
+
+            if self.is_caching {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::ProgressBar::new(self.cache_progress)
+                            .show_percentage()
+                            .desired_width(ui.available_width())
+                    );
+                });
+            }
+        });
+    }
+
+    fn draw_left_panel(&mut self, ctx: &egui::Context) {
+        egui::SidePanel::left("image_panel").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("Open Directory").clicked() {
+                    if let Some(path) = FileDialog::new().pick_folder() {
+                        self.load_directory(ctx, &path);
+                    }
+                }
+            });
+
+            if let Some(dir) = &self.current_dir {
+                ui.label(format!("Current directory: {}", dir.display()));
+            }
+
+            ui.separator();
+
+            if !self.images.is_empty() {
+                ui.horizontal(|ui| {
+                    if ui.button("Previous").clicked() {
+                        self.previous_image(ctx);
+                    }
+                    if ui.button("Next").clicked() {
+                        self.next_image(ctx);
+                    }
+                    ui.label(format!("Image {}/{}", self.current_image_idx + 1, self.images.len()));
+                });
+                ui.separator();
+            }
+
+            if let Some(texture) = &self.current_texture {
+                let available_size = ui.available_size();
+                let aspect_ratio = texture.aspect_ratio();
+                let mut size = available_size;
+
+                if (size.x / size.y) > aspect_ratio {
+                    size.x = size.y * aspect_ratio;
+                } else {
+                    size.y = size.x / aspect_ratio;
+                }
+
+                ui.add(egui::Image::new(texture)
+                    .fit_to_original_size(1.0)
+                    .max_size(size));
+            } else {
+                ui.centered_and_justified(|ui| {
+                    ui.label("No image loaded. Please select a directory.");
+                });
+            }
+        });
+    }
+
+    fn draw_feedback_message(&mut self, ui: &mut egui::Ui) {
+        if let Some(timer) = self.feedback_timer {
+            let elapsed = timer.elapsed().as_secs_f32();
+
+            if elapsed < self.feedback_duration {
+                let alpha = if elapsed > (self.feedback_duration - 3.0) {
+                    ((self.feedback_duration - elapsed) / 3.0).clamp(0.0, 1.0)
+                } else {
+                    1.0
+                };
+
+                if let Some(message) = &self.feedback_message {
+                    let color = egui::Color32::from_rgba_unmultiplied(
+                        0,    // Red
+                        255,  // Green
+                        0,    // Blue
+                        (alpha * 255.0) as u8  // Alpha
+                    );
+                    ui.colored_label(color, message);
+                }
+                ui.ctx().request_repaint();
+            } else {
+                self.feedback_message = None;
+                self.feedback_timer = None;
+            }
+        }
+    }
+
+    fn save_all(&mut self) {
+        for image in &self.images {
+            if *self.modified_files.get(&image.path).unwrap_or(&false) {
+                if let Err(err) = self.save_tags_for_image(image) {
+                    eprintln!("Failed to save tags for {}: {}", image.path.display(), err);
+                    self.feedback_message = Some(format!("Error saving tags: {}", err));
+                    self.feedback_timer = Some(std::time::Instant::now());
+                    return;
+                }
+            }
+        }
+        self.feedback_message = Some("All changes saved successfully!".to_string());
+        self.feedback_timer = Some(std::time::Instant::now());
+    }
+
+    fn backup_dataset(&mut self) {
+        if let Some(dir) = &self.current_dir {
+            let backup_dir = dir.join("backup");
+
+            self.pause_caching();
+            let current_texture = self.current_texture.clone();
+
+            if backup_dir.exists() {
+                let result = rfd::MessageDialog::new()
+                    .set_title("Backup Confirmation")
+                    .set_description("The backup folder already exists. Do you want to replace it?")
+                    .set_buttons(rfd::MessageButtons::YesNo)
+                    .show();
+
+                if result == rfd::MessageDialogResult::No {
+                    self.feedback_message = Some("Backup cancelled by the user.".to_string());
+                    self.feedback_timer = Some(std::time::Instant::now());
+                    self.resume_caching();
+                    return;
+                }
+
+                if let Err(err) = fs::remove_dir_all(&backup_dir) {
+                    self.feedback_message = Some(format!("Error: {}", err));
+                    self.feedback_timer = Some(std::time::Instant::now());
+                    self.resume_caching();
+                    return;
+                }
+            }
+
+            if let Err(err) = fs::create_dir_all(&backup_dir) {
+                self.feedback_message = Some(format!("Error during backup creation: {}", err));
+                self.feedback_timer = Some(std::time::Instant::now());
+                self.resume_caching();
+                return;
+            }
+
+            for image in &self.images {
+                let tags_path = image.path.with_extension("txt");
+
+                if let Err(err) = fs::copy(&image.path, backup_dir.join(image.path.file_name().unwrap())) {
+                    self.feedback_message = Some(format!("Error during backup: {}", err));
+                    self.feedback_timer = Some(std::time::Instant::now());
+                    self.resume_caching();
+                    return;
+                }
+
+                if let Err(err) = fs::copy(&tags_path, backup_dir.join(tags_path.file_name().unwrap())) {
+                    self.feedback_message = Some(format!("Error during backup: {}", err));
+                    self.feedback_timer = Some(std::time::Instant::now());
+                    self.resume_caching();
+                    return;
+                }
+            }
+
+            self.current_texture = current_texture;
+            self.feedback_message = Some("Backup completed successfully!".to_string());
+            self.feedback_timer = Some(std::time::Instant::now());
+            self.resume_caching();
+        }
+    }
+    fn get_tag_frequencies_for_image(&self, image: &ImageData) -> HashMap<String, usize> {
+        let mut freq_map: HashMap<String, usize> = HashMap::new();
+        for tag in &image.tags {
+            *freq_map.entry(tag.clone()).or_insert(0) += 1;
+        }
+        freq_map
     }
 
     fn remove_tag_from_all(&mut self, tag: &str) {
@@ -373,6 +513,36 @@ impl ImageTagger {
         self.feedback_timer = Some(std::time::Instant::now());
     }
 
+    fn save_tags_for_image(&self, image_data: &ImageData) -> Result<(), std::io::Error> {
+        let tags_path = image_data.path.with_extension("txt");
+        fs::write(tags_path, image_data.tags.join(", "))
+    }
+
+    fn pause_caching(&mut self) {
+        self.is_caching = false;
+        // Preserve receiver and cache, just pause the process
+    }
+
+    fn resume_caching(&mut self) {
+        if !self.images.is_empty() && !self.is_caching {
+            self.is_caching = true;
+            // Don't restart caching if we still have the receiver
+            if self.decoded_receiver.is_none() {
+                self.start_background_caching();
+            }
+        }
+    }
+
+    fn change_image(&mut self, ctx: &egui::Context) {
+        if let Some(texture) = self.image_cache.get(&self.current_image_idx).cloned() {
+            println!("Loading image from cache: {}",
+                     self.images[self.current_image_idx].path.display());
+            self.current_texture = Some(texture);
+        } else {
+            self.load_image_texture(ctx);
+        }
+    }
+
     fn apply_activation_tag(&mut self) {
         if !self.activation_tag.is_empty() {
             for image in &mut self.images {
@@ -383,6 +553,181 @@ impl ImageTagger {
             }
             self.feedback_message = Some("Activation tag applied to all images".to_string());
             self.feedback_timer = Some(std::time::Instant::now());
+        }
+    }
+
+    fn previous_image(&mut self, ctx: &egui::Context) {
+        if !self.images.is_empty() {
+            self.current_image_idx = (self.current_image_idx + self.images.len() - 1) % self.images.len();
+            self.change_image(ctx);
+        }
+    }
+
+    fn next_image(&mut self, ctx: &egui::Context) {
+        if !self.images.is_empty() {
+            self.current_image_idx = (self.current_image_idx + 1) % self.images.len();
+            self.change_image(ctx);
+        }
+    }
+
+    fn remove_duplicates_for_all(&mut self) {
+        let images = &mut self.images;
+        for image in images.iter_mut() {
+            let mut seen = std::collections::HashSet::new();
+            image.tags.retain(|tag| seen.insert(tag.clone()));
+            self.modified_files.insert(image.path.clone(), true);
+        }
+        self.feedback_message = Some("Removed duplicate tags from all images".to_string());
+        self.feedback_timer = Some(std::time::Instant::now());
+    }
+
+    fn draw_central_panel(&mut self, ctx: &egui::Context) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            if let Some(current_image) = self.images.get(self.current_image_idx).cloned() {
+                ui.heading("Tags for Current Image");
+
+                let tag_frequencies = self.get_tag_frequencies_for_image(&current_image);
+
+                ui.horizontal(|ui| {
+                    if ui.button("Sort Alphabetically (A-Z)").clicked() {
+                        self.current_sorting = Some(|a, b| a.cmp(b));
+                        self.images[self.current_image_idx].tags.sort();
+                    }
+                    if ui.button("Sort Alphabetically (Z-A)").clicked() {
+                        self.current_sorting = Some(|a, b| b.cmp(a));
+                        self.images[self.current_image_idx].tags.sort_by(|a, b| b.cmp(a));
+                    }
+                    if ui.button("Sort by Frequency (High-Low)").clicked() {
+                        self.images[self.current_image_idx].tags.sort_by(|a, b| {
+                            tag_frequencies.get(b).cmp(&tag_frequencies.get(a))
+                        });
+                    }
+                    if ui.button("Sort by Frequency (Low-High)").clicked() {
+                        self.images[self.current_image_idx].tags.sort_by(|a, b| {
+                            tag_frequencies.get(a).cmp(&tag_frequencies.get(b))
+                        });
+                    }
+                });
+
+                egui::ScrollArea::vertical()
+                    .show(ui, |ui| {
+                        for tag in &self.images[self.current_image_idx].tags {
+                            ui.label(tag);
+                        }
+                    });
+            } else {
+                ui.centered_and_justified(|ui| {
+                    ui.label("No tags to display.");
+                });
+            }
+        });
+    }
+
+    fn draw_right_panel(&mut self, ctx: &egui::Context) {
+        egui::SidePanel::right("tag_panel")
+            .resizable(true)
+            .min_width(300.0)
+            .default_width(300.0)
+            .max_width(800.0)
+            .show_separator_line(true)
+            .show(ctx, |ui| {
+                let mut tag_action: Option<TagAction> = None;
+
+                ui.heading("Tag Editing");
+
+                // Add Booru tag section
+                ui.group(|ui| {
+                    ui.heading("Add Booru Tag");
+                    // Show booru tag editor with suggestions
+                    if let Some(selected_tag) = self.booru_manager.draw_tag_editor(ui) {
+                        self.handle_tag_addition_for_image(selected_tag);
+                    }
+                });
+
+                ui.add_space(10.0);
+                ui.separator();
+
+                // Existing tag management controls
+                ui.horizontal(|ui| {
+                    if ui.button("Remove Duplicates (Current)").clicked() {
+                        if let Some(current_image) = self.images.get_mut(self.current_image_idx) {
+                            let mut seen = std::collections::HashSet::new();
+                            current_image.tags.retain(|tag| seen.insert(tag.clone()));
+                            self.modified_files.insert(current_image.path.clone(), true);
+                        }
+                    }
+                    if ui.button("Remove Duplicates (All)").clicked() {
+                        self.remove_duplicates_for_all();
+                    }
+                });
+
+                ui.add_space(10.0);
+                ui.separator();
+
+                if let Some(current_image) = self.images.get_mut(self.current_image_idx) {
+                    // Convert tags to a single string for editing
+                    let mut tags_text = current_image.tags.join(", ");
+                    let text_height = ui.available_height() - 40.0; // Leave some space for padding
+
+                    // Create a scrollable text editor
+                    let response = ui.add_sized(
+                        [ui.available_width(), text_height],
+                        egui::TextEdit::multiline(&mut tags_text)
+                            .desired_width(ui.available_width())
+                            .font(egui::TextStyle::Monospace) // Use monospace font for better editing
+                            .lock_focus(false)
+                    );
+
+                    // Update tags if the text changed
+                    if response.changed() {
+                        // Split the text into tags, clean them up
+                        let new_tags: Vec<String> = tags_text
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+
+                        if new_tags != current_image.tags {
+                            current_image.tags = new_tags;
+                            self.modified_files.insert(current_image.path.clone(), true);
+                        }
+                    }
+                }
+            });
+    }
+    fn load_directory(&mut self, ctx: &egui::Context, path: &Path) {
+        self.images.clear();
+        self.image_cache.clear();
+        self.current_image_idx = 0;
+        self.cache_progress = 0.0;
+        self.is_caching = false;
+        *self.cached_images_count.lock().unwrap() = 0;
+
+        if let Ok(entries) = fs::read_dir(path) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                if path.is_file() && matches!(path.extension().and_then(|e| e.to_str()),
+                    Some("jpg" | "jpeg" | "png")) {
+                    let tags = self.load_tags_for_image(&path).unwrap_or_default();
+                    self.images.push(ImageData {
+                        path,
+                        tags,
+                        hash: None, // Initialize hash as None
+                    });
+                }
+            }
+        }
+
+        println!("Starting background caching for {} images...", self.images.len());
+        self.current_dir = Some(path.to_path_buf());
+        self.total_images_to_cache = self.images.len();
+        self.is_caching = true;
+
+        self.start_background_caching();
+
+        if !self.images.is_empty() {
+            self.current_image_idx = 0;
+            self.load_image_texture(ctx);
         }
     }
 
@@ -434,193 +779,39 @@ impl ImageTagger {
         false
     }
 
-    fn change_image(&mut self, ctx: &egui::Context) {
-        if let Some(texture) = self.image_cache.get(&self.current_image_idx).cloned() {
-            println!("Loading image from cache: {}",
-                     self.images[self.current_image_idx].path.display());
-            self.current_texture = Some(texture);
-        } else {
-            self.load_image_texture(ctx);
-        }
-    }
+    fn draw_tag_list(&mut self, ui: &mut egui::Ui) {
+        if let Some(current_image) = self.images.get(self.current_image_idx).cloned() {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                for tag in &current_image.tags {
+                    let tag_clone = tag.clone(); // Clone outside the closure
+                    ui.horizontal(|ui| {
+                        // Show tag type if available
+                        if let Some(tag_type) = self.booru_manager.get_tag_type(&tag_clone) {
+                            let type_color = match tag_type {
+                                0 => egui::Color32::GRAY,    // General
+                                1 => egui::Color32::RED,     // Character
+                                3 => egui::Color32::GREEN,   // Copyright
+                                4 => egui::Color32::YELLOW,  // Meta
+                                _ => egui::Color32::WHITE,
+                            };
+                            ui.colored_label(type_color, "●");
+                        }
 
-    fn remove_duplicates_for_image(&mut self, image: &mut ImageData) {
-        let mut seen = std::collections::HashSet::new();
-        image.tags.retain(|tag| seen.insert(tag.clone()));
-        self.modified_files.insert(image.path.clone(), true);
-    }
+                        ui.label(&tag_clone);
+                        if ui.small_button("×").clicked() {
+                            self.handle_tag_removal_for_image(tag_clone.clone());
+                        }
 
-    fn remove_duplicates_for_all(&mut self) {
-        let images = &mut self.images;
-        for image in images.iter_mut() {
-            let mut seen = std::collections::HashSet::new();
-            image.tags.retain(|tag| seen.insert(tag.clone()));
-            self.modified_files.insert(image.path.clone(), true);
-        }
-    }
-
-    fn apply_current_sorting(&mut self) {
-        if let Some(sort_fn) = self.current_sorting {
-            self.images[self.current_image_idx]
-                .tags
-                .sort_by(sort_fn);
-        }
-    }
-
-    fn next_image(&mut self, ctx: &egui::Context) {
-        if !self.images.is_empty() {
-            self.current_image_idx = (self.current_image_idx + 1) % self.images.len();
-            self.change_image(ctx);
-        }
-    }
-
-    fn previous_image(&mut self, ctx: &egui::Context) {
-        if !self.images.is_empty() {
-            self.current_image_idx = (self.current_image_idx + self.images.len() - 1) % self.images.len();
-            self.change_image(ctx);
-        }
-    }
-
-    fn backup_dataset(&mut self) {
-        if let Some(dir) = &self.current_dir {
-            let backup_dir = dir.join("backup");
-
-            // Pause caching but preserve current texture
-            self.pause_caching();
-            let current_texture = self.current_texture.clone();
-
-            // Check if the backup directory exists
-            if backup_dir.exists() {
-                let result = rfd::MessageDialog::new()
-                    .set_title("Backup Confirmation")
-                    .set_description("The backup folder already exists. Do you want to replace it?")
-                    .set_buttons(rfd::MessageButtons::YesNo)
-                    .show();
-
-                if result == rfd::MessageDialogResult::No {
-                    self.feedback_message = Some("Backup cancelled by the user.".to_string());
-                    self.feedback_timer = Some(std::time::Instant::now());
-                    self.resume_caching();
-                    return;
-                }
-
-                if let Err(err) = fs::remove_dir_all(&backup_dir) {
-                    eprintln!("Failed to delete existing backup directory: {}", err);
-                    self.feedback_message = Some(format!("Error: {}", err));
-                    self.feedback_timer = Some(std::time::Instant::now());
-                    self.resume_caching();
-                    return;
-                }
-            }
-
-            if let Err(err) = fs::create_dir_all(&backup_dir) {
-                eprintln!("Failed to create backup directory: {}", err);
-                self.feedback_message = Some(format!("Error during backup creation: {}", err));
-                self.feedback_timer = Some(std::time::Instant::now());
-                self.resume_caching();
-                return;
-            }
-
-            for image in &self.images {
-                let tags_path = image.path.with_extension("txt");
-
-                if let Err(err) = fs::copy(&image.path, backup_dir.join(image.path.file_name().unwrap())) {
-                    eprintln!("Failed to backup image {}: {}", image.path.display(), err);
-                    self.feedback_message = Some(format!("Error during backup: {}", err));
-                    self.feedback_timer = Some(std::time::Instant::now());
-                    self.resume_caching();
-                    return;
-                }
-
-                if let Err(err) = fs::copy(&tags_path, backup_dir.join(tags_path.file_name().unwrap())) {
-                    eprintln!("Failed to backup tags {}: {}", tags_path.display(), err);
-                    self.feedback_message = Some(format!("Error during backup: {}", err));
-                    self.feedback_timer = Some(std::time::Instant::now());
-                    self.resume_caching();
-                    return;
-                }
-            }
-
-            self.current_texture = current_texture;
-            self.feedback_message = Some("Backup completed successfully!".to_string());
-            self.feedback_timer = Some(std::time::Instant::now());
-            self.resume_caching();
-        }
-    }
-
-    fn save_all(&mut self) {
-        for image in &self.images {
-            if *self.modified_files.get(&image.path).unwrap_or(&false) {
-                if let Err(err) = self.save_tags_for_image(image) {
-                    eprintln!("Failed to save tags for {}: {}", image.path.display(), err);
-                    self.feedback_message = Some(format!("Error saving tags: {}", err));
-                    self.feedback_timer = Some(std::time::Instant::now());
-                    return;
-                }
-            }
-        }
-        self.feedback_message = Some("All changes saved successfully!".to_string());
-        self.feedback_timer = Some(std::time::Instant::now());
-    }
-
-    fn get_tag_frequencies_for_image(&self, image: &ImageData) -> HashMap<String, usize> {
-        let mut freq_map: HashMap<String, usize> = HashMap::new();
-        for tag in &image.tags {
-            *freq_map.entry(tag.clone()).or_insert(0) += 1;
-        }
-        freq_map
-    }
-
-    fn load_directory(&mut self, path: &Path) {
-        self.images.clear();
-        self.image_cache.clear();
-        self.current_image_idx = 0;
-        self.cache_progress = 0.0;
-        self.is_caching = false;
-        *self.cached_images_count.lock().unwrap() = 0;
-
-        // Load image paths and metadata from only the selected directory (no subdirectories)
-        if let Ok(entries) = fs::read_dir(path) {
-            for entry in entries.filter_map(|e| e.ok()) {
-                let path = entry.path();
-                if path.is_file() && matches!(path.extension().and_then(|e| e.to_str()),
-                Some("jpg" | "jpeg" | "png")) {
-                    let tags = self.load_tags_for_image(&path).unwrap_or_default();
-                    self.images.push(ImageData {
-                        path,
-                        tags,
-                        hash: None
+                        // Show aliases if available
+                        if let Some(aliases) = self.booru_manager.get_aliases(&tag_clone) {
+                            if !aliases.is_empty() {
+                                ui.weak(format!("({})", aliases.join(", ")));
+                            }
+                        }
                     });
                 }
-            }
+            });
         }
-
-        println!("Starting background caching for {} images...", self.images.len());
-        self.current_dir = Some(path.to_path_buf());
-        self.total_images_to_cache = self.images.len(); // Set total before starting
-        self.is_caching = true;  // Set caching flag before starting
-
-        // Start the background caching process
-        self.start_background_caching();
-    }
-
-    fn load_tags_for_image(&self, image_path: &Path) -> Result<Vec<String>, std::io::Error> {
-        let tags_path = image_path.with_extension("txt");
-        if tags_path.exists() {
-            let content = fs::read_to_string(tags_path)?;
-            Ok(content
-                .split(',')
-                .map(|tag| tag.trim().to_string())
-                .filter(|tag| !tag.is_empty())
-                .collect())
-        } else {
-            Ok(Vec::new())
-        }
-    }
-
-    fn save_tags_for_image(&self, image_data: &ImageData) -> Result<(), std::io::Error> {
-        let tags_path = image_data.path.with_extension("txt");
-        fs::write(tags_path, image_data.tags.join(", "))
     }
 
     fn handle_tag_addition_for_image(&mut self, tag: String) {
@@ -644,283 +835,11 @@ impl ImageTagger {
     }
 }
 
+
+
 impl eframe::App for ImageTagger {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if let Some(rx) = &self.duplicate_rx {
-            if let Ok(DuplicateMessage::Found { duplicates }) = rx.try_recv() {
-                self.duplicate_images = duplicates;
-                let count = self.duplicate_images.values()
-                    .map(|v| v.len())
-                    .sum::<usize>();
-
-                self.feedback_message = Some(format!(
-                    "Found {} duplicate images. Click 'Remove Duplicates' to delete them.",
-                    count
-                ));
-                self.feedback_timer = Some(std::time::Instant::now());
-            }
-        }
-
-        // Process decoded messages
-        // Process decoded messages
-        if let Some(rx) = &self.decoded_receiver {
-            while let Ok(message) = rx.try_recv() {
-                match message {
-                    CacheMessage::ImageDecoded { idx, width, height, pixels, hash } => {  // <-- Updated here
-                        let color_image = egui::ColorImage::from_rgba_unmultiplied(
-                            [width as _, height as _],
-                            &pixels,
-                        );
-
-                        let texture = ctx.load_texture(
-                            format!("image_{}", idx),
-                            color_image,
-                            egui::TextureOptions::default(),
-                        );
-
-                        // Store the hash with the image data
-                        if let Some(image) = self.images.get_mut(idx) {
-                            image.hash = Some(hash);
-                        }
-
-                        self.image_cache.insert(idx, texture);
-                        // Update progress whenever we cache an image
-                        self.cache_progress = *self.cached_images_count.lock().unwrap() as f32 / self.total_images_to_cache as f32;
-                        ctx.request_repaint();
-                        println!("Cache size is now: {} images", self.image_cache.len());
-                    }
-                    CacheMessage::Error { idx, error } => {
-                        eprintln!("Error caching image {}: {}", idx, error);
-                    }
-                }
-            }
-        }
-
-        // Top panel with controls and progress
-        egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
-            self.draw_feedback_message(ui);
-
-            ui.horizontal(|ui| {
-                if ui.button("Save").clicked() {
-                    self.save_all();
-                }
-                if ui.button("Backup").clicked() {
-                    self.backup_dataset();
-                }
-
-                ui.separator();
-                ui.label("Activation tag:");
-                if ui.text_edit_singleline(&mut self.activation_tag).lost_focus()
-                    && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    self.apply_activation_tag();
-                }
-                if ui.button("Apply").clicked() {
-                    self.apply_activation_tag();
-                }
-
-                if ui.button("Find Duplicates").clicked() {
-                    self.find_duplicates();
-                }
-
-                if !self.duplicate_images.is_empty() {
-                    if ui.button("Remove Duplicates").clicked() {
-                        if let Err(err) = self.remove_duplicates() {
-                            self.feedback_message = Some(format!("Error removing duplicates: {}", err));
-                            self.feedback_timer = Some(std::time::Instant::now());
-                        }
-                    }
-                }
-            });
-
-            // Add progress bar in its own row
-            if self.is_caching {
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.add(
-                        egui::ProgressBar::new(self.cache_progress)
-                            .show_percentage()
-                            .desired_width(ui.available_width())
-                    );
-                });
-            }
-        });
-
-        // Left panel with image display
-        egui::SidePanel::left("image_panel").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                if ui.button("Open Directory").clicked() {
-                    if let Some(path) = FileDialog::new().pick_folder() {
-                        self.load_directory(&path);
-                    }
-                }
-            });
-
-            if let Some(dir) = &self.current_dir {
-                ui.label(format!("Current directory: {}", dir.display()));
-            }
-
-            ui.separator();
-
-            if !self.images.is_empty() {
-                ui.horizontal(|ui| {
-                    if ui.button("Previous").clicked() {
-                        self.previous_image(ctx);
-                    }
-                    if ui.button("Next").clicked() {
-                        self.next_image(ctx);
-                    }
-                    ui.label(format!("Image {}/{}", self.current_image_idx + 1, self.images.len()));
-                });
-                ui.separator();
-            }
-
-            if let Some(texture) = &self.current_texture {
-                let available_size = ui.available_size();
-                let aspect_ratio = texture.aspect_ratio();
-                let mut size = available_size;
-
-                if (size.x / size.y) > aspect_ratio {
-                    size.x = size.y * aspect_ratio;
-                } else {
-                    size.y = size.x / aspect_ratio;
-                }
-
-                ui.add(egui::Image::new(texture)
-                    .fit_to_original_size(1.0)
-                    .max_size(size));
-            } else {
-                ui.centered_and_justified(|ui| {
-                    ui.label("No image loaded. Please select a directory.");
-                });
-            }
-        });
-
-        // Central panel for displaying tags
-        egui::CentralPanel::default().show(ctx, |ui| {
-            if let Some(current_image) = self.images.get(self.current_image_idx).cloned() {
-                ui.heading("Tags for Current Image");
-
-                let tag_frequencies = self.get_tag_frequencies_for_image(&current_image);
-
-                ui.horizontal(|ui| {
-                    if ui.button("Sort Alphabetically (A-Z)").clicked() {
-                        self.current_sorting = Some(|a, b| a.cmp(b));
-                        self.images[self.current_image_idx].tags.sort();
-                    }
-                    if ui.button("Sort Alphabetically (Z-A)").clicked() {
-                        self.current_sorting = Some(|a, b| b.cmp(a));
-                        self.images[self.current_image_idx].tags.sort_by(|a, b| b.cmp(a));
-                    }
-                    if ui.button("Sort by Frequency (High-Low)").clicked() {
-                        self.images[self.current_image_idx].tags.sort_by(|a, b| {
-                            tag_frequencies.get(b).cmp(&tag_frequencies.get(a))
-                        });
-                    }
-                    if ui.button("Sort by Frequency (Low-High)").clicked() {
-                        self.images[self.current_image_idx].tags.sort_by(|a, b| {
-                            tag_frequencies.get(a).cmp(&tag_frequencies.get(b))
-                        });
-                    }
-                });
-
-                egui::ScrollArea::vertical()
-                    .show(ui, |ui| {
-                        for tag in &self.images[self.current_image_idx].tags {
-                            ui.label(tag);
-                        }
-                    });
-            } else {
-                ui.centered_and_justified(|ui| {
-                    ui.label("No tags to display.");
-                });
-            }
-        });
-
-        // Right panel for tag editing
-        egui::SidePanel::right("tag_panel")
-            .resizable(false)
-            .min_width(300.0)
-            .default_width(300.0)
-            .show(ctx, |ui| {
-                let mut tag_action = None;
-
-                ui.heading("Tag Editing");
-
-                ui.add_space(5.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Remove Duplicate Tags (Current Image)").clicked() {
-                        if let Some(current_image) = self.images.get_mut(self.current_image_idx) {
-                            let mut seen = std::collections::HashSet::new();
-                            current_image.tags.retain(|tag| seen.insert(tag.clone()));
-                            self.modified_files.insert(current_image.path.clone(), true);
-                        }
-                    }
-                    if ui.button("Remove Duplicate Tags (All Images)").clicked() {
-                        self.remove_duplicates_for_all();
-                    }
-                });
-
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    static mut REMOVE_TAG: String = String::new();
-                    unsafe {
-                        let text_response = ui.text_edit_singleline(&mut REMOVE_TAG);
-                        if ui.button("Remove From All").clicked() && !REMOVE_TAG.is_empty() {
-                            self.remove_tag_from_all(&REMOVE_TAG);
-                            REMOVE_TAG.clear();
-                        }
-                        if text_response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && !REMOVE_TAG.is_empty() {
-                            self.remove_tag_from_all(&REMOVE_TAG);
-                            REMOVE_TAG.clear();
-                        }
-                    }
-                });
-
-                ui.add_space(10.0);
-                ui.separator();
-
-                ui.horizontal(|ui| {
-                    let _response = ui.add(
-                        egui::TextEdit::singleline(&mut self.new_tag)
-                            .desired_width(ui.available_width() - 60.0),
-                    );
-                    if ui.button("Add").clicked() && !self.new_tag.is_empty() {
-                        self.handle_tag_addition_for_image(self.new_tag.clone());
-                        self.new_tag.clear();
-                    }
-                    if _response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        if !self.new_tag.is_empty() {
-                            self.handle_tag_addition_for_image(self.new_tag.clone());
-                            self.new_tag.clear();
-                        }
-                    }
-                });
-
-                if let Some(_current_image) = self.images.get(self.current_image_idx) {
-                    egui::ScrollArea::vertical()
-                        .show(ui, |ui| {
-                            for tag in &self.images[self.current_image_idx].tags {
-                                ui.horizontal(|ui| {
-                                    ui.label(tag);
-                                    if ui.small_button("×").clicked() {
-                                        tag_action = Some(TagAction::Remove(tag.clone()));
-                                    }
-                                });
-                            }
-                        });
-                }
-
-                if let Some(action) = tag_action {
-                    match action {
-                        TagAction::Add(tag) => {
-                            self.handle_tag_addition_for_image(tag);
-                        }
-                        TagAction::Remove(tag) => {
-                            self.handle_tag_removal_for_image(tag);
-                        }
-                    }
-                }
-            });
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.update_app(ctx, frame);
     }
 }
 
@@ -934,6 +853,6 @@ fn main() -> Result<(), eframe::Error> {
     eframe::run_native(
         "Image Tagger",
         native_options,
-        Box::new(|cc| Ok(Box::new(ImageTagger::new(cc)))),
+        Box::new(|cc| Ok(Box::new(ImageTagger::new(cc)))), // Fix: Wrap in Ok()
     )
 }
