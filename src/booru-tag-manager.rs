@@ -18,6 +18,7 @@ pub struct BooruTagManager {
     tag_suggestions: Vec<String>,
     current_input: String,
     selected_suggestion: Option<usize>,
+    is_focused: bool,
 }
 
 impl BooruTagManager {
@@ -89,14 +90,18 @@ impl BooruTagManager {
 
     pub fn draw_tag_editor(&mut self, ui: &mut egui::Ui) -> Option<String> {
         let mut selected_tag = None;
-
         let response = ui.text_edit_singleline(&mut self.current_input);
 
+        // Update focus state
+        self.is_focused = response.has_focus();
+
         if response.changed() {
-            self.update_suggestions(&self.current_input);
+            let input = self.current_input.clone(); // Clone here to avoid borrow conflict
+            self.update_suggestions(&input);
         }
 
-        if !self.tag_suggestions.is_empty() {
+        // Only show suggestions window when input is focused
+        if self.is_focused && !self.tag_suggestions.is_empty() {
             egui::Window::new("Tag Suggestions")
                 .fixed_size([300.0, 300.0])
                 .collapsible(false)
@@ -123,7 +128,6 @@ impl BooruTagManager {
 
                             if label.clicked() {
                                 selected_tag = Some(suggestion.clone());
-                                self.current_input.clear();
                                 self.tag_suggestions.clear();
                                 break;
                             }
@@ -134,13 +138,15 @@ impl BooruTagManager {
 
         if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
             if !self.current_input.is_empty() {
-                // If there are suggestions, use the first one
                 if let Some(first_suggestion) = self.tag_suggestions.first() {
                     selected_tag = Some(first_suggestion.clone());
                 }
-                self.current_input.clear();
                 self.tag_suggestions.clear();
             }
+        }
+
+        if selected_tag.is_some() {
+            self.current_input.clear();
         }
 
         selected_tag

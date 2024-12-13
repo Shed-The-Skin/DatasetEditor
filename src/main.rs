@@ -581,6 +581,42 @@ impl ImageTagger {
         self.feedback_timer = Some(std::time::Instant::now());
     }
 
+    fn process_tags_text(text: &str) -> Vec<String> {
+
+        // Split by commas but preserve empty sections between valid tags
+        let mut tags: Vec<String> = Vec::new();
+        let mut current_tag = String::new();
+        let mut in_tag = false;
+
+        for c in text.chars() {
+            match c {
+                ',' => {
+                    if !current_tag.trim().is_empty() {
+                        tags.push(current_tag.trim().to_string());
+                        current_tag.clear();
+                        in_tag = false;
+                    }
+                }
+                c if c.is_whitespace() => {
+                    if in_tag {
+                        current_tag.push(c);
+                    }
+                }
+                _ => {
+                    current_tag.push(c);
+                    in_tag = true;
+                }
+            }
+        }
+
+        // Don't forget the last tag
+        if !current_tag.trim().is_empty() {
+            tags.push(current_tag.trim().to_string());
+        }
+
+        tags
+    }
+
     fn draw_central_panel(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             if let Some(current_image) = self.images.get(self.current_image_idx).cloned() {
@@ -631,8 +667,6 @@ impl ImageTagger {
             .max_width(800.0)
             .show_separator_line(true)
             .show(ctx, |ui| {
-                let mut tag_action: Option<TagAction> = None;
-
                 ui.heading("Tag Editing");
 
                 // Add Booru tag section
@@ -640,7 +674,19 @@ impl ImageTagger {
                     ui.heading("Add Booru Tag");
                     // Show booru tag editor with suggestions
                     if let Some(selected_tag) = self.booru_manager.draw_tag_editor(ui) {
-                        self.handle_tag_addition_for_image(selected_tag);
+                        if let Some(current_image) = self.images.get_mut(self.current_image_idx) {
+                            let mut tags_text = current_image.tags.join(", ");
+                            if !tags_text.is_empty() {
+                                tags_text.push_str(", ");
+                            }
+                            tags_text.push_str(&selected_tag);
+                            current_image.tags = tags_text
+                                .split(',')
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .collect();
+                            self.modified_files.insert(current_image.path.clone(), true);
+                        }
                     }
                 });
 
@@ -665,28 +711,22 @@ impl ImageTagger {
                 ui.separator();
 
                 if let Some(current_image) = self.images.get_mut(self.current_image_idx) {
-                    // Convert tags to a single string for editing
                     let mut tags_text = current_image.tags.join(", ");
-                    let text_height = ui.available_height() - 40.0; // Leave some space for padding
+                    // Don't automatically append comma anymore
+                    let text_height = ui.available_height() - 40.0;
 
-                    // Create a scrollable text editor
                     let response = ui.add_sized(
                         [ui.available_width(), text_height],
                         egui::TextEdit::multiline(&mut tags_text)
                             .desired_width(ui.available_width())
-                            .font(egui::TextStyle::Monospace) // Use monospace font for better editing
+                            .font(egui::TextStyle::Monospace)
+                            .cursor_at_end(true)
                             .lock_focus(false)
                     );
 
-                    // Update tags if the text changed
+                    // Update tags only if text actually changed
                     if response.changed() {
-                        // Split the text into tags, clean them up
-                        let new_tags: Vec<String> = tags_text
-                            .split(',')
-                            .map(|s| s.trim().to_string())
-                            .filter(|s| !s.is_empty())
-                            .collect();
-
+                        let new_tags = ImageTagger::process_tags_text(&tags_text);  // Fix: Use associated function
                         if new_tags != current_image.tags {
                             current_image.tags = new_tags;
                             self.modified_files.insert(current_image.path.clone(), true);
