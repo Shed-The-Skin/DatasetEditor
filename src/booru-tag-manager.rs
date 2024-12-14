@@ -100,17 +100,33 @@ impl BooruTagManager {
 
     pub fn draw_tag_editor(&mut self, ui: &mut egui::Ui) -> Option<String> {
         let mut selected_tag = None;
-        let response = ui.text_edit_singleline(&mut self.current_input);
 
+        // Render the text input field
+        let response = ui.text_edit_singleline(&mut self.current_input);
         self.is_focused = response.has_focus();
 
+        // Update suggestions on input change
         if response.changed() {
-            let input = self.current_input.clone();
-            self.update_suggestions(&input);
+            let current_input = self.current_input.clone(); // Clone the input to avoid conflicts
+            self.update_suggestions(&current_input);
+            println!("Input changed: {}", current_input);
         }
 
-        if self.is_focused && !self.tag_suggestions.is_empty() {
-            // Clone the suggestions to avoid borrow checker issues
+
+        // Handle Enter key to add tag
+        if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            if !self.current_input.trim().is_empty() {
+                println!("Enter pressed with input: {}", self.current_input);
+                selected_tag = Some(self.current_input.clone());
+                self.current_input.clear();
+                self.tag_suggestions.clear();
+                return selected_tag;
+            }
+        }
+
+        // Display suggestions in a pop-up
+        if !self.tag_suggestions.is_empty() {
+            // Clone the suggestions to avoid borrow conflicts
             let suggestions = self.tag_suggestions.clone();
 
             egui::Window::new("Tag Suggestions")
@@ -119,48 +135,23 @@ impl BooruTagManager {
                 .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-5.0, 5.0))
                 .show(ui.ctx(), |ui| {
                     egui::ScrollArea::vertical().show(ui, |ui| {
-                        for suggestion in suggestions.iter() {
-                            let suggestion_clone = suggestion.clone();
-                            let tag_type = self.get_tag_type(&suggestion_clone);
+                        for suggestion in suggestions {
+                            ui.horizontal(|ui| {
+                                if ui.button(&suggestion).clicked() {
+                                    println!("Pop-up tag clicked: {}", suggestion);
 
-                            let clicked = ui.horizontal(|ui| {
-                                if let Some(tag_type) = tag_type {
-                                    let color = match tag_type {
-                                        0 => egui::Color32::GRAY,
-                                        1 => egui::Color32::RED,
-                                        3 => egui::Color32::GREEN,
-                                        4 => egui::Color32::YELLOW,
-                                        _ => egui::Color32::WHITE,
-                                    };
-                                    ui.colored_label(color, "●");
+                                    // Update input and simulate adding the tag
+                                    self.current_input = suggestion.clone();
+                                    selected_tag = Some(self.current_input.clone());
+                                    self.current_input.clear();
+                                    self.tag_suggestions.clear();
+
+                                    println!("Selected tag for addition: {:?}", selected_tag);
                                 }
-
-                                ui.selectable_label(false, &suggestion_clone).clicked()
-                            }).inner;
-
-                            if clicked {
-                                selected_tag = Some(suggestion_clone);
-                                self.current_input.clear();
-                                self.tag_suggestions.clear();
-                                break;
-                            }
+                            });
                         }
                     });
                 });
-        }
-
-        if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-            if !self.current_input.is_empty() {
-                // Try to find an exact match first
-                let input_underscore = self.current_input.replace(' ', "_");
-                if let Some(tag) = self.tag_suggestions.iter().find(|t| t == &&input_underscore) {
-                    selected_tag = Some(tag.clone());
-                } else if let Some(first) = self.tag_suggestions.first() {
-                    selected_tag = Some(first.clone());
-                }
-                self.current_input.clear();
-                self.tag_suggestions.clear();
-            }
         }
 
         selected_tag
