@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use rfd::FileDialog;
+use rfd;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use rayon::prelude::*;
@@ -388,55 +388,85 @@ impl ImageTagger {
     }
 
     fn draw_left_panel(&mut self, ctx: &egui::Context) {
-        egui::SidePanel::left("image_panel").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                if ui.button("Open Directory").clicked() {
-                    if let Some(path) = FileDialog::new().pick_folder() {
-                        self.load_directory(ctx, &path);
+        egui::SidePanel::left("image_panel")
+            .resizable(true)
+            .min_width(200.0)
+            .default_width(300.0)
+            .max_width(600.0)
+            .show(ctx, |ui| {
+                // Directory controls
+                ui.horizontal(|ui| {
+                    if ui.button("Open Directory").clicked() {
+                        if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                            self.load_directory(ctx, &path);
+                        }
                     }
+                });
+
+                if let Some(dir) = &self.current_dir {
+                    ui.label(format!("Current directory: {}", dir.display()));
+                }
+
+                ui.separator();
+
+                // Navigation controls
+                if !self.images.is_empty() {
+                    ui.horizontal(|ui| {
+                        if ui.button("Previous").clicked() {
+                            self.previous_image(ctx);
+                        }
+                        if ui.button("Next").clicked() {
+                            self.next_image(ctx);
+                        }
+                        ui.label(format!("Image {}/{}", self.current_image_idx + 1, self.images.len()));
+                    });
+                    ui.separator();
+                }
+
+                ui.heading("Current Image");
+
+                // Image display
+                if let Some(current_image) = self.images.get(self.current_image_idx).cloned() {
+                    if let Some(texture) = self.current_texture.as_ref() {
+                        // Get the intrinsic size of the texture
+                        let size = texture.size_vec2();
+
+                        // Calculate scaling while maintaining aspect ratio
+                        let max_width = ui.available_width();
+                        let aspect_ratio = size.x / size.y;
+                        let scaled_size = egui::vec2(max_width, max_width / aspect_ratio);
+
+                        // Create a vertical layout for the image and filename
+                        ui.vertical_centered(|ui| {
+                            // Display the image
+                            ui.add(egui::Image::new((texture.id(), scaled_size)));
+
+                            // Add some space between image and filename
+                            ui.add_space(4.0);
+
+                            // Display the filename centered
+                            let filename = current_image
+                                .path
+                                .file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy();
+
+                            // Simply use the heading style for the filename and let ui.heading center it
+                            ui.heading(&*filename);
+                        });
+                    } else {
+                        ui.centered_and_justified(|ui| {
+                            ui.label("Image not loaded.");
+                        });
+                    }
+                } else {
+                    ui.centered_and_justified(|ui| {
+                        ui.label("No image selected. Please open a directory.");
+                    });
                 }
             });
-
-            if let Some(dir) = &self.current_dir {
-                ui.label(format!("Current directory: {}", dir.display()));
-            }
-
-            ui.separator();
-
-            if !self.images.is_empty() {
-                ui.horizontal(|ui| {
-                    if ui.button("Previous").clicked() {
-                        self.previous_image(ctx);
-                    }
-                    if ui.button("Next").clicked() {
-                        self.next_image(ctx);
-                    }
-                    ui.label(format!("Image {}/{}", self.current_image_idx + 1, self.images.len()));
-                });
-                ui.separator();
-            }
-
-            if let Some(texture) = &self.current_texture {
-                let available_size = ui.available_size();
-                let aspect_ratio = texture.aspect_ratio();
-                let mut size = available_size;
-
-                if (size.x / size.y) > aspect_ratio {
-                    size.x = size.y * aspect_ratio;
-                } else {
-                    size.y = size.x / aspect_ratio;
-                }
-
-                ui.add(egui::Image::new(texture)
-                    .fit_to_original_size(1.0)
-                    .max_size(size));
-            } else {
-                ui.centered_and_justified(|ui| {
-                    ui.label("No image loaded. Please select a directory.");
-                });
-            }
-        });
     }
+
 
     fn draw_feedback_message(&mut self, ui: &mut egui::Ui) {
         if let Some(timer) = self.feedback_timer {
