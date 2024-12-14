@@ -20,6 +20,13 @@ struct ImageData {
     hash: Option<Vec<u8>>,
 }
 
+#[derive(Clone, Copy)]
+enum SortType {
+    AlphabeticalAsc,
+    AlphabeticalDesc,
+    FrequencyHighLow,
+    FrequencyLowHigh,
+}
 #[derive(Debug)]
 enum TagAction {
     Add(String),
@@ -88,6 +95,7 @@ struct ImageTagger {
     duplicate_rx: Option<std::sync::mpsc::Receiver<DuplicateMessage>>,
     booru_manager: BooruTagManager,
     show_tag_suggestions: bool,
+    current_sort_type: Option<SortType>,
 }
 
 impl Default for ImageTagger {
@@ -125,12 +133,13 @@ impl Default for ImageTagger {
             duplicate_rx: None,
             booru_manager: BooruTagManager::new(),
             show_tag_suggestions: false,
+            current_sort_type: None, // Add this line
         }
     }
 }
 
 impl ImageTagger {
-    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         let mut tagger = Self::default();
 
         if let Err(err) = tagger.booru_manager.load_from_csv(
@@ -140,6 +149,43 @@ impl ImageTagger {
         }
 
         tagger
+    }
+
+    fn apply_current_sorting(&mut self) {
+        if let Some(sort_type) = self.current_sort_type {
+            if let Some(current_image) = self.images.get_mut(self.current_image_idx) {
+                match sort_type {
+                    SortType::AlphabeticalAsc => {
+                        current_image.tags.sort();
+                    }
+                    SortType::AlphabeticalDesc => {
+                        current_image.tags.sort_by(|a, b| b.cmp(a));
+                    }
+                    SortType::FrequencyHighLow => {
+                        // Get frequencies before mutably borrowing image
+                        let frequencies: HashMap<_, _> = current_image.tags.iter()
+                            .fold(HashMap::new(), |mut map, tag| {
+                                *map.entry(tag.to_string()).or_insert(0) += 1;
+                                map
+                            });
+                        current_image.tags.sort_by(|a, b| {
+                            frequencies.get(b).cmp(&frequencies.get(a))
+                        });
+                    }
+                    SortType::FrequencyLowHigh => {
+                        // Get frequencies before mutably borrowing image
+                        let frequencies: HashMap<_, _> = current_image.tags.iter()
+                            .fold(HashMap::new(), |mut map, tag| {
+                                *map.entry(tag.to_string()).or_insert(0) += 1;
+                                map
+                            });
+                        current_image.tags.sort_by(|a, b| {
+                            frequencies.get(a).cmp(&frequencies.get(b))
+                        });
+                    }
+                }
+            }
+        }
     }
 
     fn load_tags_for_image(&self, image_path: &Path) -> Result<Vec<String>, std::io::Error> {
@@ -246,7 +292,7 @@ impl ImageTagger {
         });
     }
 
-    fn update_app(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+    fn update_app(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Process duplicate detection results
         if let Some(rx) = &self.duplicate_rx {
             if let Ok(DuplicateMessage::Found { duplicates }) = rx.try_recv() {
@@ -535,12 +581,12 @@ impl ImageTagger {
 
     fn change_image(&mut self, ctx: &egui::Context) {
         if let Some(texture) = self.image_cache.get(&self.current_image_idx).cloned() {
-            println!("Loading image from cache: {}",
-                     self.images[self.current_image_idx].path.display());
             self.current_texture = Some(texture);
         } else {
             self.load_image_texture(ctx);
         }
+        // Apply sorting after changing image
+        self.apply_current_sorting();
     }
 
     fn apply_activation_tag(&mut self) {
@@ -582,36 +628,38 @@ impl ImageTagger {
     }
 
     fn process_tags_text(text: &str) -> Vec<String> {
-
-        // Split by commas but preserve empty sections between valid tags
         let mut tags: Vec<String> = Vec::new();
-        let mut current_tag = String::new();
-        let mut in_tag = false;
+        let mut in_append_mode = false;
+        let mut append_text = String::new();
 
-        for c in text.chars() {
-            match c {
-                ',' => {
-                    if !current_tag.trim().is_empty() {
-                        tags.push(current_tag.trim().to_string());
-                        current_tag.clear();
-                        in_tag = false;
-                    }
+        // Split by commas
+        for (i, part) in text.split(',').enumerate() {
+            if i == 0 && part.starts_with(' ') {
+                // If the first part starts with space, we're appending
+                in_append_mode = true;
+            }
+
+            if in_append_mode {
+                append_text.push_str(part);
+                if !text.ends_with(part) {
+                    append_text.push(',');
                 }
-                c if c.is_whitespace() => {
-                    if in_tag {
-                        current_tag.push(c);
-                    }
-                }
-                _ => {
-                    current_tag.push(c);
-                    in_tag = true;
+            } else {
+                let trimmed = part.trim();
+                if !trimmed.is_empty() {
+                    tags.push(trimmed.to_string());
                 }
             }
         }
 
-        // Don't forget the last tag
-        if !current_tag.trim().is_empty() {
-            tags.push(current_tag.trim().to_string());
+        // Handle append text if present
+        if in_append_mode && !append_text.trim().is_empty() {
+            tags.push(append_text.trim_start().to_string());
+        }
+
+        // Preserve trailing comma
+        if text.ends_with(',') {
+            tags.push(String::new());
         }
 
         tags
@@ -620,37 +668,57 @@ impl ImageTagger {
     fn draw_central_panel(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             if let Some(current_image) = self.images.get(self.current_image_idx).cloned() {
-                ui.heading("Tags for Current Image");
-
-                let tag_frequencies = self.get_tag_frequencies_for_image(&current_image);
-
-                ui.horizontal(|ui| {
-                    if ui.button("Sort Alphabetically (A-Z)").clicked() {
-                        self.current_sorting = Some(|a, b| a.cmp(b));
-                        self.images[self.current_image_idx].tags.sort();
-                    }
-                    if ui.button("Sort Alphabetically (Z-A)").clicked() {
-                        self.current_sorting = Some(|a, b| b.cmp(a));
-                        self.images[self.current_image_idx].tags.sort_by(|a, b| b.cmp(a));
-                    }
-                    if ui.button("Sort by Frequency (High-Low)").clicked() {
-                        self.images[self.current_image_idx].tags.sort_by(|a, b| {
-                            tag_frequencies.get(b).cmp(&tag_frequencies.get(a))
-                        });
-                    }
-                    if ui.button("Sort by Frequency (Low-High)").clicked() {
-                        self.images[self.current_image_idx].tags.sort_by(|a, b| {
-                            tag_frequencies.get(a).cmp(&tag_frequencies.get(b))
-                        });
-                    }
-                });
-
-                egui::ScrollArea::vertical()
-                    .show(ui, |ui| {
-                        for tag in &self.images[self.current_image_idx].tags {
-                            ui.label(tag);
+                ui.vertical(|ui| {
+                    ui.heading("Tags for Current Image");
+                    ui.horizontal(|ui| {
+                        if ui.button("Sort Alphabetically (A-Z)").clicked() {
+                            self.current_sort_type = Some(SortType::AlphabeticalAsc);
+                            self.apply_current_sorting();
+                        }
+                        if ui.button("Sort Alphabetically (Z-A)").clicked() {
+                            self.current_sort_type = Some(SortType::AlphabeticalDesc);
+                            self.apply_current_sorting();
+                        }
+                        if ui.button("Sort by Frequency (High-Low)").clicked() {
+                            self.current_sort_type = Some(SortType::FrequencyHighLow);
+                            self.apply_current_sorting();
+                        }
+                        if ui.button("Sort by Frequency (Low-High)").clicked() {
+                            self.current_sort_type = Some(SortType::FrequencyLowHigh);
+                            self.apply_current_sorting();
                         }
                     });
+
+                    // Calculate remaining height for scroll area
+                    let available_height = ui.available_height();
+
+                    // Use scroll area with available height
+                    egui::ScrollArea::vertical()
+                        .max_height(available_height)
+                        .show(ui, |ui| {
+                            // Use larger text and spacing for better readability
+                            ui.style_mut().spacing.item_spacing.y = 8.0;
+
+                            // Draw actual tags
+                            for tag in &current_image.tags {
+                                let tag_type = self.booru_manager.get_tag_type(tag);
+                                ui.horizontal(|ui| {
+                                    // Show tag type if available
+                                    if let Some(tag_type) = tag_type {
+                                        let color = match tag_type {
+                                            0 => egui::Color32::GRAY,    // General
+                                            1 => egui::Color32::RED,     // Character
+                                            3 => egui::Color32::GREEN,   // Copyright
+                                            4 => egui::Color32::YELLOW,  // Meta
+                                            _ => egui::Color32::WHITE,
+                                        };
+                                        ui.colored_label(color, "●");
+                                    }
+                                    ui.label(egui::RichText::new(tag).size(16.0));
+                                });
+                            }
+                        });
+                });
             } else {
                 ui.centered_and_justified(|ui| {
                     ui.label("No tags to display.");
@@ -669,27 +737,32 @@ impl ImageTagger {
             .show(ctx, |ui| {
                 ui.heading("Tag Editing");
 
-                // Add Booru tag section
                 ui.group(|ui| {
                     ui.heading("Add Booru Tag");
-                    // Show booru tag editor with suggestions
                     if let Some(selected_tag) = self.booru_manager.draw_tag_editor(ui) {
                         if let Some(current_image) = self.images.get_mut(self.current_image_idx) {
-                            let mut tags_text = current_image.tags.join(", ");
-                            if !tags_text.is_empty() {
-                                tags_text.push_str(", ");
+                            if !current_image.tags.contains(&selected_tag) {
+                                // Add the new tag
+                                current_image.tags.push(selected_tag.clone());
+                                self.modified_files.insert(current_image.path.clone(), true);
+
+                                // Force immediate sorting if needed
+                                if let Some(_sort_type) = self.current_sort_type {
+                                    self.apply_current_sorting();
+                                }
+
+                                // Add feedback
+                                self.feedback_message = Some(format!("Added tag: {}", selected_tag));
+                                self.feedback_timer = Some(std::time::Instant::now());
+
+                                // Force rebuild of UI
+                                ui.ctx().request_repaint();
                             }
-                            tags_text.push_str(&selected_tag);
-                            current_image.tags = tags_text
-                                .split(',')
-                                .map(|s| s.trim().to_string())
-                                .filter(|s| !s.is_empty())
-                                .collect();
-                            self.modified_files.insert(current_image.path.clone(), true);
                         }
                     }
                 });
 
+                // Rest of the panel code remains the same...
                 ui.add_space(10.0);
                 ui.separator();
 
@@ -712,24 +785,25 @@ impl ImageTagger {
 
                 if let Some(current_image) = self.images.get_mut(self.current_image_idx) {
                     let mut tags_text = current_image.tags.join(", ");
-                    // Don't automatically append comma anymore
+
+                    // Preserve cursor position for better editing
                     let text_height = ui.available_height() - 40.0;
+                    let text_edit = egui::TextEdit::multiline(&mut tags_text)
+                        .desired_width(ui.available_width())
+                        .font(egui::TextStyle::Monospace)
+                        .cursor_at_end(true)
+                        .lock_focus(false);
 
-                    let response = ui.add_sized(
-                        [ui.available_width(), text_height],
-                        egui::TextEdit::multiline(&mut tags_text)
-                            .desired_width(ui.available_width())
-                            .font(egui::TextStyle::Monospace)
-                            .cursor_at_end(true)
-                            .lock_focus(false)
-                    );
+                    // Use item id to maintain cursor position
+                    let _id = ui.make_persistent_id("tag_editor");
+                    let response = ui.add_sized([ui.available_width(), text_height], text_edit);
 
-                    // Update tags only if text actually changed
                     if response.changed() {
-                        let new_tags = ImageTagger::process_tags_text(&tags_text);  // Fix: Use associated function
+                        let new_tags = ImageTagger::process_tags_text(&tags_text);
                         if new_tags != current_image.tags {
                             current_image.tags = new_tags;
                             self.modified_files.insert(current_image.path.clone(), true);
+                            ui.ctx().request_repaint();
                         }
                     }
                 }

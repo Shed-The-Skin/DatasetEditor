@@ -56,25 +56,35 @@ impl BooruTagManager {
         Ok(())
     }
 
+    pub fn get_tag_type(&self, tag: &str) -> Option<i32> {
+        self.tags.get(tag).map(|t| t.tag_type)
+    }
+
+    pub fn get_aliases(&self, tag: &str) -> Option<&Vec<String>> {
+        self.tags.get(tag).map(|t| &t.aliases)
+    }
     pub fn update_suggestions(&mut self, input: &str) {
         if input.is_empty() {
             self.tag_suggestions.clear();
             return;
         }
 
+        // Convert input spaces to underscores for matching
+        let search_input = input.replace(' ', "_");
+
         let mut matches: Vec<_> = self.tags.values()
             .filter(|tag| {
-                tag.name.contains(input) ||
-                    tag.aliases.iter().any(|alias| alias.contains(input))
+                tag.name.contains(&search_input) ||
+                    tag.aliases.iter().any(|alias| alias.contains(&search_input))
             })
             .map(|tag| tag.name.clone())
             .collect();
 
         matches.sort_by(|a, b| {
-            let a_exact = a == input;
-            let b_exact = b == input;
-            let a_starts = a.starts_with(input);
-            let b_starts = b.starts_with(input);
+            let a_exact = a == &search_input;
+            let b_exact = b == &search_input;
+            let a_starts = a.starts_with(&search_input);
+            let b_starts = b.starts_with(&search_input);
 
             if a_exact != b_exact {
                 return b_exact.cmp(&a_exact);
@@ -92,42 +102,45 @@ impl BooruTagManager {
         let mut selected_tag = None;
         let response = ui.text_edit_singleline(&mut self.current_input);
 
-        // Update focus state
         self.is_focused = response.has_focus();
 
         if response.changed() {
-            let input = self.current_input.clone(); // Clone here to avoid borrow conflict
+            let input = self.current_input.clone();
             self.update_suggestions(&input);
         }
 
-        // Only show suggestions window when input is focused
         if self.is_focused && !self.tag_suggestions.is_empty() {
+            // Clone the suggestions to avoid borrow checker issues
+            let suggestions = self.tag_suggestions.clone();
+
             egui::Window::new("Tag Suggestions")
                 .fixed_size([300.0, 300.0])
                 .collapsible(false)
                 .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-5.0, 5.0))
                 .show(ui.ctx(), |ui| {
                     egui::ScrollArea::vertical().show(ui, |ui| {
-                        for (idx, suggestion) in self.tag_suggestions.iter().enumerate() {
-                            let is_selected = self.selected_suggestion == Some(idx);
-                            let label = if let Some(tag_type) = self.get_tag_type(suggestion) {
-                                let color = match tag_type {
-                                    0 => egui::Color32::GRAY,    // General
-                                    1 => egui::Color32::RED,     // Character
-                                    3 => egui::Color32::GREEN,   // Copyright
-                                    4 => egui::Color32::YELLOW,  // Meta
-                                    _ => egui::Color32::WHITE,
-                                };
-                                ui.horizontal(|ui| {
-                                    ui.colored_label(color, "●");
-                                    ui.selectable_label(is_selected, suggestion)
-                                }).inner
-                            } else {
-                                ui.selectable_label(is_selected, suggestion)
-                            };
+                        for suggestion in suggestions.iter() {
+                            let suggestion_clone = suggestion.clone();
+                            let tag_type = self.get_tag_type(&suggestion_clone);
 
-                            if label.clicked() {
-                                selected_tag = Some(suggestion.clone());
+                            let clicked = ui.horizontal(|ui| {
+                                if let Some(tag_type) = tag_type {
+                                    let color = match tag_type {
+                                        0 => egui::Color32::GRAY,
+                                        1 => egui::Color32::RED,
+                                        3 => egui::Color32::GREEN,
+                                        4 => egui::Color32::YELLOW,
+                                        _ => egui::Color32::WHITE,
+                                    };
+                                    ui.colored_label(color, "●");
+                                }
+
+                                ui.selectable_label(false, &suggestion_clone).clicked()
+                            }).inner;
+
+                            if clicked {
+                                selected_tag = Some(suggestion_clone);
+                                self.current_input.clear();
                                 self.tag_suggestions.clear();
                                 break;
                             }
@@ -138,25 +151,19 @@ impl BooruTagManager {
 
         if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
             if !self.current_input.is_empty() {
-                if let Some(first_suggestion) = self.tag_suggestions.first() {
-                    selected_tag = Some(first_suggestion.clone());
+                // Try to find an exact match first
+                let input_underscore = self.current_input.replace(' ', "_");
+                if let Some(tag) = self.tag_suggestions.iter().find(|t| t == &&input_underscore) {
+                    selected_tag = Some(tag.clone());
+                } else if let Some(first) = self.tag_suggestions.first() {
+                    selected_tag = Some(first.clone());
                 }
+                self.current_input.clear();
                 self.tag_suggestions.clear();
             }
-        }
-
-        if selected_tag.is_some() {
-            self.current_input.clear();
         }
 
         selected_tag
     }
 
-    pub fn get_tag_type(&self, tag: &str) -> Option<i32> {
-        self.tags.get(tag).map(|t| t.tag_type)
-    }
-
-    pub fn get_aliases(&self, tag: &str) -> Option<&Vec<String>> {
-        self.tags.get(tag).map(|t| &t.aliases)
-    }
 }
