@@ -94,7 +94,7 @@
 ## Configuration
 
 ### Booru Database Integration
-To use Booru-style tag suggestions, provide a `.csv` file containing your tag database or use the included `danbooru-12-10-24-underscore.csv` file. Example:
+To use Booru-style tag suggestions, provide a `.csv` file containing your tag database or use the included `danbooru-12-10-24-underscore.csv` ([Source](https://github.com/BetaDoggo/danbooru-tag-list) file. Example:
 
 ```bash
 tags.csv:
