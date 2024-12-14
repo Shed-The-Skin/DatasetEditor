@@ -26,6 +26,42 @@ impl BooruTagManager {
         Self::default()
     }
 
+    pub fn select_next_suggestion(&mut self) {
+        if self.tag_suggestions.is_empty() {
+            return;
+        }
+
+        self.selected_suggestion = Some(match self.selected_suggestion {
+            Some(idx) => (idx + 1).min(self.tag_suggestions.len() - 1),
+            None => 0,
+        });
+
+        // Update current input to show selected suggestion
+        if let Some(idx) = self.selected_suggestion {
+            if let Some(tag) = self.tag_suggestions.get(idx) {
+                self.current_input = tag.clone();
+            }
+        }
+    }
+
+    pub fn select_previous_suggestion(&mut self) {
+        if self.tag_suggestions.is_empty() {
+            return;
+        }
+
+        self.selected_suggestion = Some(match self.selected_suggestion {
+            Some(idx) => idx.saturating_sub(1),
+            None => self.tag_suggestions.len() - 1,
+        });
+
+        // Update current input to show selected suggestion
+        if let Some(idx) = self.selected_suggestion {
+            if let Some(tag) = self.tag_suggestions.get(idx) {
+                self.current_input = tag.clone();
+            }
+        }
+    }
+
     pub fn load_from_csv(&mut self, path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
         let mut file = File::open(path)?;
         let mut contents = String::new();
@@ -107,13 +143,12 @@ impl BooruTagManager {
 
         // Update suggestions on input change
         if response.changed() {
-            let current_input = self.current_input.clone(); // Clone the input to avoid conflicts
+            let current_input = self.current_input.clone(); // Clone to avoid conflicts
             self.update_suggestions(&current_input);
             println!("Input changed: {}", current_input);
         }
 
-
-        // Handle Enter key to add tag
+        // Handle Enter key to add a tag
         if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
             if !self.current_input.trim().is_empty() {
                 println!("Enter pressed with input: {}", self.current_input);
@@ -126,8 +161,7 @@ impl BooruTagManager {
 
         // Display suggestions in a pop-up
         if !self.tag_suggestions.is_empty() {
-            // Clone the suggestions to avoid borrow conflicts
-            let suggestions = self.tag_suggestions.clone();
+            let suggestions = self.tag_suggestions.clone(); // Clone suggestions to avoid borrowing conflicts
 
             egui::Window::new("Tag Suggestions")
                 .fixed_size([300.0, 300.0])
@@ -135,26 +169,29 @@ impl BooruTagManager {
                 .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-5.0, 5.0))
                 .show(ui.ctx(), |ui| {
                     egui::ScrollArea::vertical().show(ui, |ui| {
-                        for suggestion in suggestions {
-                            ui.horizontal(|ui| {
-                                if ui.button(&suggestion).clicked() {
-                                    println!("Pop-up tag clicked: {}", suggestion);
+                        for (idx, suggestion) in suggestions.iter().enumerate() {
+                            let is_selected = self.selected_suggestion == Some(idx);
 
-                                    // Update input and simulate adding the tag
-                                    self.current_input = suggestion.clone();
-                                    selected_tag = Some(self.current_input.clone());
-                                    self.current_input.clear();
-                                    self.tag_suggestions.clear();
+                            let text = if is_selected {
+                                egui::RichText::new(suggestion).strong()
+                                    .background_color(ui.style().visuals.selection.bg_fill)
+                            } else {
+                                egui::RichText::new(suggestion)
+                            };
 
-                                    println!("Selected tag for addition: {:?}", selected_tag);
-                                }
-                            });
+                            if ui.add(egui::Label::new(text).sense(egui::Sense::click())).clicked() {
+                                selected_tag = Some(suggestion.clone());
+                                self.current_input.clear();
+                                self.tag_suggestions.clear();
+                            }
                         }
                     });
                 });
         }
 
+
         selected_tag
     }
+
 
 }

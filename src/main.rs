@@ -296,6 +296,30 @@ impl ImageTagger {
     }
 
     fn update_app(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
+            self.next_image(ctx);
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
+            self.previous_image(ctx);
+        }
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
+            self.save_all();
+        }
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::B)) {
+            self.backup_dataset();
+        }
+
+        // Handle tag suggestion navigation
+        if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
+            self.booru_manager.select_next_suggestion();
+            ctx.request_repaint(); // Ensure UI updates immediately
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
+            self.booru_manager.select_previous_suggestion();
+            ctx.request_repaint(); // Ensure UI updates immediately
+        }
+
+
         // Process duplicate detection results
         if let Some(rx) = &self.duplicate_rx {
             if let Ok(DuplicateMessage::Found { duplicates }) = rx.try_recv() {
@@ -391,8 +415,8 @@ impl ImageTagger {
         egui::SidePanel::left("image_panel")
             .resizable(true)
             .min_width(200.0)
-            .default_width(300.0)
-            .max_width(600.0)
+            .default_width(400.0)
+            .max_width(800.0)
             .show(ctx, |ui| {
                 // Directory controls
                 ui.horizontal(|ui| {
@@ -756,9 +780,8 @@ impl ImageTagger {
                             println!("No current image available to add the tag.");
                         }
                     }
-
-
                 });
+
 
                 ui.add_space(10.0);
                 ui.separator();
