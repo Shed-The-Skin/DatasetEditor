@@ -14,7 +14,7 @@ pub struct BooruTag {
 
 #[derive(Default)]
 pub struct BooruTagManager {
-    tags: HashMap<String, BooruTag>,
+    pub tags: HashMap<String, BooruTag>,
     tag_suggestions: Vec<String>,
     current_input: String,
     selected_suggestion: Option<usize>,
