@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use eframe::egui;
 use image::ImageReader;
 use serde::{Deserialize, Serialize};
@@ -1025,9 +1027,26 @@ impl eframe::App for ImageTagger {
 
 
 fn main() -> Result<(), eframe::Error> {
+    let icon = include_bytes!("../assets/icon.ico");
+
+    // Load the icon data
+    let image = image::load_from_memory(icon)
+        .expect("Failed to load icon")
+        .into_rgba8();
+
+    let (width, height) = image.dimensions();
+    let rgba = image.into_raw();
+
+    let icon_data = egui::IconData {
+        rgba,
+        width: width as _,
+        height: height as _,
+    };
+
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1600.0, 800.0]),
+            .with_inner_size([1600.0, 800.0])
+            .with_icon(icon_data),  // Remove Some() and Arc::new()
         ..Default::default()
     };
 

@@ -3,6 +3,7 @@ name = "Dataset-Editor"
 version = "0.1.0"
 edition = "2021"
 authors = ["ShedTheSkin"]
+build = "build.rs"  # Move this line here
 
 [profile.release]
 opt-level = 3            # Maximum optimization
