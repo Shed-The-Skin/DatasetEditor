@@ -14,7 +14,7 @@ pub struct BooruTag {
 
 #[derive(Default)]
 pub struct BooruTagManager {
-    tags: HashMap<String, BooruTag>,
+    pub tags: HashMap<String, BooruTag>,
     tag_suggestions: Vec<String>,
     current_input: String,
     selected_suggestion: Option<usize>,
@@ -137,16 +137,22 @@ impl BooruTagManager {
     pub fn draw_tag_editor(&mut self, ui: &mut egui::Ui) -> Option<String> {
         let mut selected_tag = None;
 
+        // Give the text input a consistent ID
+        let text_edit_id = ui.make_persistent_id("booru_tag_input");
+
         // Render the text input field
-        let response = ui.text_edit_singleline(&mut self.current_input);
-        self.is_focused = response.has_focus();
+        let response = ui.add(egui::TextEdit::singleline(&mut self.current_input)
+            .id(text_edit_id)
+            .hint_text("Type to add tags..."));
 
         // Update suggestions on input change
         if response.changed() {
-            let current_input = self.current_input.clone(); // Clone to avoid conflicts
+            let current_input = self.current_input.clone();
             self.update_suggestions(&current_input);
             println!("Input changed: {}", current_input);
         }
+
+        self.is_focused = response.has_focus();
 
         // Handle Enter key to add a tag
         if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
@@ -155,13 +161,14 @@ impl BooruTagManager {
                 selected_tag = Some(self.current_input.clone());
                 self.current_input.clear();
                 self.tag_suggestions.clear();
-                return selected_tag;
+                // Request focus back after selection
+                ui.ctx().memory_mut(|mem| mem.request_focus(text_edit_id));
             }
         }
 
         // Display suggestions in a pop-up
         if !self.tag_suggestions.is_empty() {
-            let suggestions = self.tag_suggestions.clone(); // Clone suggestions to avoid borrowing conflicts
+            let suggestions = self.tag_suggestions.clone();
 
             egui::Window::new("Tag Suggestions")
                 .fixed_size([300.0, 300.0])
@@ -183,12 +190,13 @@ impl BooruTagManager {
                                 selected_tag = Some(suggestion.clone());
                                 self.current_input.clear();
                                 self.tag_suggestions.clear();
+                                // Request focus back to the text input after selection
+                                ui.ctx().memory_mut(|mem| mem.request_focus(text_edit_id));
                             }
                         }
                     });
                 });
         }
-
 
         selected_tag
     }

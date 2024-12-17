@@ -135,7 +135,7 @@ impl Default for ImageTagger {
             booru_manager: BooruTagManager::new(),
             show_tag_suggestions: false,
             current_sort_type: None,
-            right_panel_width: Some(300.0), // Initialize with default width
+            right_panel_width: Some(300.0),
         }
     }
 }
@@ -143,15 +143,17 @@ impl Default for ImageTagger {
 
 impl ImageTagger {
     fn new(_cc: &eframe::CreationContext<'_>) -> Self {
-        let mut tagger = Self::default();
+        //let mut tagger = Self::default();
 
-        if let Err(err) = tagger.booru_manager.load_from_csv(
-            std::path::Path::new("danbooru-12-10-24-underscore.csv")
-        ) {
-            eprintln!("Failed to load Booru database: {}", err);
-        }
+        // if let Err(err) = tagger.booru_manager.load_from_csv(
+        //     std::path::Path::new("danbooru-12-10-24-underscore.csv")
+        // ) {
+        //     eprintln!("Failed to load Booru database: {}", err);
+        // }
 
-        tagger
+        //tagger
+
+        Self::default()
     }
 
     fn apply_current_sorting(&mut self) {
@@ -296,12 +298,24 @@ impl ImageTagger {
     }
 
     fn update_app(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
-            self.next_image(ctx);
+        // Check for text edit focus before handling arrow keys
+        let mut has_text_focus = false;
+        ctx.memory(|mem| {
+            has_text_focus = mem.has_focus(egui::Id::new("text_editor")) ||
+                mem.has_focus(egui::Id::new("tag_panel"));
+        });
+
+        // Only handle arrow key navigation when no text editor has focus
+        if !has_text_focus {
+            if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
+                self.next_image(ctx);
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
+                self.previous_image(ctx);
+            }
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
-            self.previous_image(ctx);
-        }
+
+        // Keyboard shortcuts
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
             self.save_all();
         }
@@ -312,13 +326,12 @@ impl ImageTagger {
         // Handle tag suggestion navigation
         if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
             self.booru_manager.select_next_suggestion();
-            ctx.request_repaint(); // Ensure UI updates immediately
+            ctx.request_repaint();
         }
         if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
             self.booru_manager.select_previous_suggestion();
-            ctx.request_repaint(); // Ensure UI updates immediately
+            ctx.request_repaint();
         }
-
 
         // Process duplicate detection results
         if let Some(rx) = &self.duplicate_rx {
@@ -754,12 +767,50 @@ impl ImageTagger {
             .max_width(800.0)
             .show_separator_line(true)
             .show(ctx, |ui| {
-                // Dynamically store the current width of the right panel
                 self.right_panel_width = Some(ui.available_width());
 
                 // Panel heading
                 ui.heading("Tag Editing");
 
+                // In draw_right_panel
+                let tags_loaded = !self.booru_manager.tags.is_empty();
+                if !tags_loaded {
+                    ui.horizontal(|ui| {
+                        if ui.button("❗ Import Booru Tags CSV").clicked() {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("CSV Files", &["csv"])
+                                .pick_file()
+                            {
+                                if let Err(err) = self.booru_manager.load_from_csv(&path) {
+                                    self.feedback_message = Some(format!("Failed to load CSV: {}", err));
+                                    self.feedback_timer = Some(std::time::Instant::now());
+                                } else {
+                                    self.feedback_message = Some("Successfully loaded Booru tags database".to_string());
+                                    self.feedback_timer = Some(std::time::Instant::now());
+                                }
+                            }
+                        }
+                        ui.label("⬅ Required for tag suggestions");
+                    });
+                } else {
+                    if ui.button("Import Booru Tags CSV").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("CSV Files", &["csv"])
+                            .pick_file()
+                        {
+                            if let Err(err) = self.booru_manager.load_from_csv(&path) {
+                                self.feedback_message = Some(format!("Failed to load CSV: {}", err));
+                                self.feedback_timer = Some(std::time::Instant::now());
+                            } else {
+                                self.feedback_message = Some("Successfully loaded Booru tags database".to_string());
+                                self.feedback_timer = Some(std::time::Instant::now());
+                            }
+                        }
+                    }
+                }
+
+                ui.add_space(10.0);
+                ui.separator();
 
                 // Add Booru tag section
                 ui.group(|ui| {
@@ -809,7 +860,8 @@ impl ImageTagger {
                         .desired_width(ui.available_width())
                         .font(egui::TextStyle::Monospace)
                         .cursor_at_end(true)
-                        .lock_focus(false);
+                        .lock_focus(false)
+                        .id(egui::Id::new("text_editor"));
 
                     if ui.add(text_edit).changed() {
                         let new_tags = tags_text
@@ -842,7 +894,7 @@ impl ImageTagger {
                     self.images.push(ImageData {
                         path,
                         tags,
-                        hash: None, // Initialize hash as None
+                        hash: None,
                     });
                 }
             }
@@ -971,6 +1023,7 @@ impl eframe::App for ImageTagger {
     }
 }
 
+
 fn main() -> Result<(), eframe::Error> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -981,6 +1034,6 @@ fn main() -> Result<(), eframe::Error> {
     eframe::run_native(
         "Image Tagger",
         native_options,
-        Box::new(|cc| Ok(Box::new(ImageTagger::new(cc)))), // Fix: Wrap in Ok()
+        Box::new(|cc| Ok(Box::new(ImageTagger::new(cc)))),
     )
 }

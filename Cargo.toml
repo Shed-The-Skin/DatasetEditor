@@ -4,6 +4,25 @@ version = "0.1.0"
 edition = "2021"
 authors = ["ShedTheSkin"]
 
+[profile.release]
+opt-level = 3            # Maximum optimization
+lto = "fat"             # Link-time optimization
+codegen-units = 1       # Maximize optimization, sacrificing compile time
+panic = "abort"         # Remove panic unwinding code
+strip = true            # Strip symbols from binary
+debug = false           # No debug symbols
+
+[profile.dev]
+opt-level = 1
+debug = true
+
+[profile.dev.package."*"]
+opt-level = 1
+
+# Add this section for build dependencies
+[build-dependencies]
+winres = "0.1"
+
 [dependencies]
 eframe = "0.29.1"
 egui = "0.29.1"
@@ -16,3 +35,6 @@ rfd = "0.15.1"
 parking_lot = "0.12.3"
 rayon = "1.8"
 csv = "1.1"
+mimalloc = { version = "0.1", default-features = false }
+hashbrown = "0.14"
+crossbeam = "0.8"
