@@ -135,7 +135,7 @@ impl Default for ImageTagger {
             booru_manager: BooruTagManager::new(),
             show_tag_suggestions: false,
             current_sort_type: None,
-            right_panel_width: Some(300.0), // Initialize with default width
+            right_panel_width: Some(300.0),
         }
     }
 }
@@ -296,12 +296,24 @@ impl ImageTagger {
     }
 
     fn update_app(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
-            self.next_image(ctx);
+        // Check for text edit focus before handling arrow keys
+        let mut has_text_focus = false;
+        ctx.memory(|mem| {
+            has_text_focus = mem.has_focus(egui::Id::new("text_editor")) ||
+                mem.has_focus(egui::Id::new("tag_panel"));
+        });
+
+        // Only handle arrow key navigation when no text editor has focus
+        if !has_text_focus {
+            if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
+                self.next_image(ctx);
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
+                self.previous_image(ctx);
+            }
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
-            self.previous_image(ctx);
-        }
+
+        // Keyboard shortcuts
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
             self.save_all();
         }
@@ -312,13 +324,12 @@ impl ImageTagger {
         // Handle tag suggestion navigation
         if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
             self.booru_manager.select_next_suggestion();
-            ctx.request_repaint(); // Ensure UI updates immediately
+            ctx.request_repaint();
         }
         if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
             self.booru_manager.select_previous_suggestion();
-            ctx.request_repaint(); // Ensure UI updates immediately
+            ctx.request_repaint();
         }
-
 
         // Process duplicate detection results
         if let Some(rx) = &self.duplicate_rx {
@@ -809,7 +820,8 @@ impl ImageTagger {
                         .desired_width(ui.available_width())
                         .font(egui::TextStyle::Monospace)
                         .cursor_at_end(true)
-                        .lock_focus(false);
+                        .lock_focus(false)
+                        .id(egui::Id::new("text_editor"));
 
                     if ui.add(text_edit).changed() {
                         let new_tags = tags_text
@@ -842,7 +854,7 @@ impl ImageTagger {
                     self.images.push(ImageData {
                         path,
                         tags,
-                        hash: None, // Initialize hash as None
+                        hash: None,
                     });
                 }
             }
@@ -981,6 +993,6 @@ fn main() -> Result<(), eframe::Error> {
     eframe::run_native(
         "Image Tagger",
         native_options,
-        Box::new(|cc| Ok(Box::new(ImageTagger::new(cc)))), // Fix: Wrap in Ok()
+        Box::new(|cc| Ok(Box::new(ImageTagger::new(cc)))),
     )
 }
