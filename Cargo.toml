@@ -39,3 +39,4 @@ csv = "1.1"
 mimalloc = { version = "0.1", default-features = false }
 hashbrown = "0.14"
 crossbeam = "0.8"
+dirs = "5"

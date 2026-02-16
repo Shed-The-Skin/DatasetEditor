@@ -1,9 +1,9 @@
+use csv::ReaderBuilder;
+use egui;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
-use csv::ReaderBuilder;
-use serde::{Deserialize, Serialize};
-use egui;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BooruTag {
@@ -62,7 +62,10 @@ impl BooruTagManager {
         }
     }
 
-    pub fn load_from_csv(&mut self, path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn load_from_csv(
+        &mut self,
+        path: &std::path::Path,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let mut file = File::open(path)?;
         let mut contents = String::new();
         file.read_to_string(&mut contents)?;
@@ -76,16 +79,17 @@ impl BooruTagManager {
             if record.len() >= 4 {
                 let name = record[0].to_string();
                 let tag_type = record[1].parse::<i32>().unwrap_or(0);
-                let aliases: Vec<String> = record[3]
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .collect();
+                let aliases: Vec<String> =
+                    record[3].split(',').map(|s| s.trim().to_string()).collect();
 
-                self.tags.insert(name.clone(), BooruTag {
-                    name,
-                    tag_type,
-                    aliases,
-                });
+                self.tags.insert(
+                    name.clone(),
+                    BooruTag {
+                        name,
+                        tag_type,
+                        aliases,
+                    },
+                );
             }
         }
 
@@ -108,10 +112,15 @@ impl BooruTagManager {
         // Convert input spaces to underscores for matching
         let search_input = input.replace(' ', "_");
 
-        let mut matches: Vec<_> = self.tags.values()
+        let mut matches: Vec<_> = self
+            .tags
+            .values()
             .filter(|tag| {
-                tag.name.contains(&search_input) ||
-                    tag.aliases.iter().any(|alias| alias.contains(&search_input))
+                tag.name.contains(&search_input)
+                    || tag
+                        .aliases
+                        .iter()
+                        .any(|alias| alias.contains(&search_input))
             })
             .map(|tag| tag.name.clone())
             .collect();
@@ -135,15 +144,32 @@ impl BooruTagManager {
     }
 
     pub fn draw_tag_editor(&mut self, ui: &mut egui::Ui) -> Option<String> {
+        self.draw_tag_editor_with_id(
+            ui,
+            "booru_tag_input",
+            "Type to add tags...",
+            "Tag Suggestions",
+        )
+    }
+
+    pub fn draw_tag_editor_with_id(
+        &mut self,
+        ui: &mut egui::Ui,
+        id: &str,
+        hint: &str,
+        window_title: &str,
+    ) -> Option<String> {
         let mut selected_tag = None;
 
         // Give the text input a consistent ID
-        let text_edit_id = ui.make_persistent_id("booru_tag_input");
+        let text_edit_id = ui.make_persistent_id(id);
 
         // Render the text input field
-        let response = ui.add(egui::TextEdit::singleline(&mut self.current_input)
-            .id(text_edit_id)
-            .hint_text("Type to add tags..."));
+        let response = ui.add(
+            egui::TextEdit::singleline(&mut self.current_input)
+                .id(text_edit_id)
+                .hint_text(hint),
+        );
 
         // Update suggestions on input change
         if response.changed() {
@@ -170,7 +196,7 @@ impl BooruTagManager {
         if !self.tag_suggestions.is_empty() {
             let suggestions = self.tag_suggestions.clone();
 
-            egui::Window::new("Tag Suggestions")
+            egui::Window::new(window_title)
                 .fixed_size([300.0, 300.0])
                 .collapsible(false)
                 .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-5.0, 5.0))
@@ -180,13 +206,17 @@ impl BooruTagManager {
                             let is_selected = self.selected_suggestion == Some(idx);
 
                             let text = if is_selected {
-                                egui::RichText::new(suggestion).strong()
+                                egui::RichText::new(suggestion)
+                                    .strong()
                                     .background_color(ui.style().visuals.selection.bg_fill)
                             } else {
                                 egui::RichText::new(suggestion)
                             };
 
-                            if ui.add(egui::Label::new(text).sense(egui::Sense::click())).clicked() {
+                            if ui
+                                .add(egui::Label::new(text).sense(egui::Sense::click()))
+                                .clicked()
+                            {
                                 selected_tag = Some(suggestion.clone());
                                 self.current_input.clear();
                                 self.tag_suggestions.clear();
@@ -200,6 +230,4 @@ impl BooruTagManager {
 
         selected_tag
     }
-
-
 }
