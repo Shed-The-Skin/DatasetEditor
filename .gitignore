@@ -3,6 +3,8 @@
 **/*.rs.bk
 Cargo.lock
 
+*.lock
+
 # IDEs and editors
 .idea/
 .vscode/
