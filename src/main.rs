@@ -18,9 +18,29 @@ use booru_tag_manager::BooruTagManager;
 // Data Types
 // ============================================================================
 
+#[derive(Serialize, Deserialize, Clone)]
+struct CleanSettings {
+    remove_parentheses: bool,
+    remove_brackets: bool,
+    remove_colon_digits: bool,
+    custom_chars: String,
+}
+
+impl Default for CleanSettings {
+    fn default() -> Self {
+        Self {
+            remove_parentheses: true,
+            remove_brackets: true,
+            remove_colon_digits: true,
+            custom_chars: String::new(),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Default)]
 struct AppSettings {
     booru_csv_path: Option<PathBuf>,
+    clean_settings: CleanSettings,
 }
 
 impl AppSettings {
@@ -155,6 +175,7 @@ struct ImageTagger {
 
     // UI state
     right_panel_width: Option<f32>,
+    show_clean_settings: bool,
 
     // Settings
     settings: AppSettings,
@@ -194,6 +215,7 @@ impl Default for ImageTagger {
             booru_manager: BooruTagManager::new(),
             booru_remove_manager: BooruTagManager::new(),
             right_panel_width: Some(300.0),
+            show_clean_settings: false,
             settings: AppSettings::default(),
         }
     }
@@ -663,16 +685,24 @@ impl ImageTagger {
         tags
     }
 
-    fn clean_tag(tag: &str) -> String {
+    fn clean_tag(tag: &str, settings: &CleanSettings) -> String {
+        let custom: Vec<char> = settings.custom_chars.chars().collect();
         let mut result = String::with_capacity(tag.len());
         let chars: Vec<char> = tag.chars().collect();
         let mut i = 0;
         while i < chars.len() {
-            if chars[i] == '(' || chars[i] == ')' {
+            // Remove parentheses
+            if settings.remove_parentheses && (chars[i] == '(' || chars[i] == ')') {
                 i += 1;
                 continue;
             }
-            if chars[i] == ':' {
+            // Remove brackets
+            if settings.remove_brackets && (chars[i] == '[' || chars[i] == ']') {
+                i += 1;
+                continue;
+            }
+            // Remove :digits pattern
+            if settings.remove_colon_digits && chars[i] == ':' {
                 let start = i;
                 i += 1;
                 while i < chars.len() && chars[i].is_ascii_digit() {
@@ -684,6 +714,11 @@ impl ImageTagger {
                 result.push(':');
                 continue;
             }
+            // Remove custom characters
+            if custom.contains(&chars[i]) {
+                i += 1;
+                continue;
+            }
             result.push(chars[i]);
             i += 1;
         }
@@ -691,6 +726,7 @@ impl ImageTagger {
     }
 
     fn clean_tags(&mut self, all: bool) {
+        let clean_settings = self.settings.clean_settings.clone();
         let range = if all {
             0..self.images.len()
         } else {
@@ -708,7 +744,7 @@ impl ImageTagger {
                 let mut changed = false;
                 for tag in image.tags.iter_mut() {
                     let original = tag.clone();
-                    *tag = Self::clean_tag(tag);
+                    *tag = Self::clean_tag(tag, &clean_settings);
                     if *tag != original {
                         println!("Cleaned tag '{}' -> '{}' in {}", original, tag, filename);
                         changed = true;
@@ -1177,7 +1213,36 @@ impl ImageTagger {
                         if ui.button("Clean Tags").clicked() {
                             self.clean_tags(self.apply_to_all);
                         }
+                        if ui
+                            .button(if self.show_clean_settings {
+                                "\u{2699} \u{25B2}"
+                            } else {
+                                "\u{2699} \u{25BC}"
+                            })
+                            .on_hover_text("Configure tag cleaning")
+                            .clicked()
+                        {
+                            self.show_clean_settings = !self.show_clean_settings;
+                        }
                     });
+
+                    if self.show_clean_settings {
+                        ui.group(|ui| {
+                            ui.label("Clean Tags Settings:");
+                            let cs = &mut self.settings.clean_settings;
+                            ui.checkbox(&mut cs.remove_parentheses, "Remove ( )");
+                            ui.checkbox(&mut cs.remove_brackets, "Remove [ ]");
+                            ui.checkbox(&mut cs.remove_colon_digits, "Remove :digits (e.g. :123)");
+                            ui.horizontal(|ui| {
+                                ui.label("Custom chars to remove:");
+                                ui.text_edit_singleline(&mut cs.custom_chars);
+                            });
+                            if ui.button("Save Settings").clicked() {
+                                self.settings.save();
+                                self.set_feedback("Clean settings saved");
+                            }
+                        });
+                    }
 
                     ui.add_space(10.0);
                     ui.separator();
